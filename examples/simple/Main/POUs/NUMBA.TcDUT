@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <DUT Name="NUMBA" Id="{d3c904d7-df96-4fc9-913b-233b98c8810a}">
+    <Declaration><![CDATA[TYPE NUMBA :
+STRUCT
+	More: LREAL;
+	Dizasta: TESTE;
+	bleeks: DWORD;
+	moar: TestStruct;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

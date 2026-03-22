@@ -1,0 +1,32 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="MAIN" Id="{2ab37a9e-ef80-4059-af04-e0db3c92f28a}" SpecialFunc="None">
+    <Declaration><![CDATA[PROGRAM MAIN
+VAR
+	i : INT;
+	b: REAL;
+	change_int: INT;
+	state: UINT;
+	start: BOOL;
+	eeks: TestStruct;
+	beeks: TestStruct;
+	theetest: TESTE;
+	today: DATE;
+	timetest: TIME := T#25S;
+	dt_test : DT;
+	masta_disasta: NUMBA;
+	test_array: ARRAY[0..12] OF INT;
+	blargh: TOD;
+	ArrayOfStructs: ARRAY[1..5] OF NUMBA;
+	dastring : STRING := 'BOB';
+	longint: LINT := 300;
+	lwordtest: LWORD := 12435;
+	ulintdsaaa: ULINT := 214321;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[i := i + 1;
+eeks.b := i *2;]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

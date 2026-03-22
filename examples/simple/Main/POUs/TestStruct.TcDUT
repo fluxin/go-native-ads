@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <DUT Name="TestStruct" Id="{ebcb16e4-fd99-4454-afea-c9751729e78f}">
+    <Declaration><![CDATA[TYPE TestStruct :
+STRUCT
+	i: INT;
+	b: REAL;
+	test_array_st: ARRAY[0..12] OF LREAL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

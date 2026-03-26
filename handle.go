@@ -37,9 +37,13 @@ func GetHandle[T any](conn *Connection, symbolName string) (*Handle[T], error) {
 	var zero T
 	goType := reflect.TypeOf(zero)
 
-	// Validate scalar/time handles against PLC primitive ADS types.
+	// Validate scalar/time/duration handles against PLC primitive ADS types.
 	// Structs and arrays are validated by shape during encode/decode.
-	if isPrimitiveType(goType) {
+	if isDurationType(goType) {
+		if err := validateDurationType(symbol.DataType, conn.datatypes); err != nil {
+			return nil, fmt.Errorf("type mismatch for %s: %w", symbolName, err)
+		}
+	} else if isPrimitiveType(goType) {
 		adsTypeForValidation := symbol.DataType
 		if enumInfo, err := conn.GetEnum(symbol.DataType); err == nil {
 			adsTypeForValidation = enumInfo.BaseType
@@ -94,6 +98,11 @@ func isPrimitiveType(t reflect.Type) bool {
 // isTimeType checks if a Go type is time.Time
 func isTimeType(t reflect.Type) bool {
 	return t.String() == "time.Time"
+}
+
+// isDurationType checks if a Go type is time.Duration
+func isDurationType(t reflect.Type) bool {
+	return t.String() == "time.Duration"
 }
 
 // Read fetches the current value from the PLC.
@@ -316,6 +325,19 @@ func (h *Handle[T]) Length() uint32          { return h.length }
 func (h *Handle[T]) Connection() *Connection { return h.conn }
 func (h *Handle[T]) SymbolInfo() *Symbol     { return h.symbol }
 
+func validateDurationType(adsType string, datatypes map[string]SymbolUploadDataType) error {
+	dt := adsType
+	if !Registry.IsKnownType(adsType) {
+		if typeInfo, ok := datatypes[adsType]; ok && typeInfo.DataType != "" {
+			dt = typeInfo.DataType
+		}
+	}
+	if dt == "TIME" {
+		return nil
+	}
+	return fmt.Errorf("type mismatch: Go type time.Duration does not match ADS type %s (expected TIME)", dt)
+}
+
 func validateTimeType(adsType string, datatypes map[string]SymbolUploadDataType) error {
 	dt := adsType
 	if !Registry.IsKnownType(adsType) {
@@ -324,7 +346,7 @@ func validateTimeType(adsType string, datatypes map[string]SymbolUploadDataType)
 		}
 	}
 
-	if dt == "TIME" || dt == "TOD" || dt == "TIME_OF_DAY" || dt == "DATE" || dt == "DT" || dt == "DATE_AND_TIME" {
+	if dt == "TOD" || dt == "TIME_OF_DAY" || dt == "DATE" || dt == "DT" || dt == "DATE_AND_TIME" {
 		return nil
 	}
 

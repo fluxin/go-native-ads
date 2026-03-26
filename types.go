@@ -104,8 +104,9 @@ func (r *TypeRegistry) registerTypes() {
 		// String type
 		{GoType: "string", ADSType: "STRING", Aliases: nil, Size: 0, Kind: reflect.String},
 
-		// Time types (all map to time.Time)
-		{GoType: "time.Time", ADSType: "TIME", Aliases: nil, Size: 4, Kind: reflect.Struct},
+		// Duration type (TIME is a duration in milliseconds, e.g. T#4s)
+		{GoType: "time.Duration", ADSType: "TIME", Aliases: nil, Size: 4, Kind: reflect.Int64},
+		// Time types (map to time.Time)
 		{GoType: "time.Time", ADSType: "TOD", Aliases: []string{"TIME_OF_DAY"}, Size: 4, Kind: reflect.Struct},
 		{GoType: "time.Time", ADSType: "DATE", Aliases: nil, Size: 4, Kind: reflect.Struct},
 		{GoType: "time.Time", ADSType: "DT", Aliases: []string{"DATE_AND_TIME"}, Size: 4, Kind: reflect.Struct},
@@ -125,8 +126,10 @@ func (r *TypeRegistry) registerTypes() {
 			r.knownTypes[alias] = true
 		}
 
-		// Register by kind (for primitive types, map directly)
-		if t.GoType != "time.Time" {
+		// Register by kind (for primitive types, map directly).
+		// Exclude time.Time (struct kind shared with user structs)
+		// and time.Duration (int64 kind shared with LINT).
+		if t.GoType != "time.Time" && t.GoType != "time.Duration" {
 			r.byKind[t.Kind] = t
 		}
 	}

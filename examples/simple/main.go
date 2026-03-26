@@ -264,7 +264,7 @@ func testTimeValues(conn *ads.Connection) error {
 	if err != nil {
 		return err
 	}
-	timeVar, err := ads.GetHandle[time.Time](conn, "MAIN.timetest")
+	timeVar, err := ads.GetHandle[time.Duration](conn, "MAIN.timetest")
 	if err != nil {
 		return err
 	}
@@ -301,7 +301,7 @@ func testTimeValues(conn *ads.Connection) error {
 		return fmt.Errorf("MAIN.dt_test mismatch: wrote %s, read %s", dtRef, dtRead)
 	}
 
-	timeRef := time.Date(2026, 3, 21, 12, 34, 56, 0, time.UTC)
+	timeRef := 4 * time.Second // T#4s in TwinCAT
 	if err := timeVar.Write(timeRef); err != nil {
 		return err
 	}
@@ -309,8 +309,8 @@ func testTimeValues(conn *ads.Connection) error {
 	if err != nil {
 		return err
 	}
-	if expected := expectedTodTimeDecode(timeRef); !timeRead.Equal(expected) {
-		return fmt.Errorf("MAIN.timetest mismatch: expected %s, read %s", expected, timeRead)
+	if timeRead != timeRef {
+		return fmt.Errorf("MAIN.timetest mismatch: wrote %s, read %s", timeRef, timeRead)
 	}
 
 	todRef := time.Date(2026, 3, 21, 8, 9, 10, 0, time.UTC)

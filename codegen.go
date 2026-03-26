@@ -77,6 +77,22 @@ func (conn *Connection) GenerateStructBody(symbolName string) (string, error) {
 	return conn.generateStructBody(symbol, ""), nil
 }
 
+// GenerateTypeFrom generates a Go type definition from an existing Symbol,
+// using the specified Go name instead of deriving it from the symbol path.
+// This is useful for generating dependent struct types referenced by arrays
+// or other structs.
+func (conn *Connection) GenerateTypeFrom(symbol *Symbol, goTypeName string) (string, error) {
+	info, err := conn.analyzeSymbol(symbol)
+	if err != nil {
+		return "", fmt.Errorf("failed to analyze symbol: %w", err)
+	}
+	info.GoName = goTypeName
+	if info.IsStruct {
+		info.GoType = goTypeName
+	}
+	return conn.generateTypeCode(info)
+}
+
 // AnalyzeType returns detailed information about an ADS symbol's type structure
 // without generating code. Useful for programmatic type inspection.
 func (conn *Connection) AnalyzeType(symbolName string) (*GeneratedTypeInfo, error) {
@@ -111,7 +127,7 @@ func (conn *Connection) analyzeSymbol(symbol *Symbol) (*GeneratedTypeInfo, error
 		if enumGoType := conn.enumGoType(symbol.DataType); enumGoType != "" {
 			info.GoType = enumGoType
 		} else {
-			info.GoType = Registry.GetGoType(baseType)
+			info.GoType = qualifiedGoType(Registry.GetGoType(baseType))
 		}
 		info.IsStruct = false
 		info.IsArray = false
@@ -133,7 +149,7 @@ func (conn *Connection) analyzeSymbol(symbol *Symbol) (*GeneratedTypeInfo, error
 				if elemBaseType == "" {
 					elemBaseType = firstChild.DataType // Fallback
 				}
-				elemGoType := Registry.GetGoType(elemBaseType)
+				elemGoType := qualifiedGoType(Registry.GetGoType(elemBaseType))
 				if enumGoType := conn.enumGoType(firstChild.DataType); enumGoType != "" {
 					elemGoType = enumGoType
 				}
@@ -167,7 +183,7 @@ func (conn *Connection) analyzeField(field *Symbol) GeneratedFieldInfo {
 	if baseType == "" {
 		baseType = field.DataType // Fallback
 	}
-	goType := Registry.GetGoType(baseType)
+	goType := qualifiedGoType(Registry.GetGoType(baseType))
 	if enumGoType := conn.enumGoType(field.DataType); enumGoType != "" {
 		goType = enumGoType
 	}
@@ -190,7 +206,7 @@ func (conn *Connection) analyzeField(field *Symbol) GeneratedFieldInfo {
 			if elemBaseType == "" {
 				elemBaseType = firstChild.DataType // Fallback
 			}
-			elemGoType := Registry.GetGoType(elemBaseType)
+			elemGoType := qualifiedGoType(Registry.GetGoType(elemBaseType))
 			if !Registry.IsKnownType(elemBaseType) {
 				elemGoType = goName(firstChild.DataType)
 			}
@@ -296,7 +312,7 @@ func (conn *Connection) generateGoTypeString(symbol *Symbol, indent string) stri
 	if enumGoType := conn.enumGoType(symbol.DataType); enumGoType != "" {
 		return enumGoType
 	}
-	return Registry.GetGoType(baseType)
+	return qualifiedGoType(Registry.GetGoType(baseType))
 }
 
 func (conn *Connection) enumGoType(dataType string) string {
@@ -304,6 +320,31 @@ func (conn *Connection) enumGoType(dataType string) string {
 		return goName(dataType)
 	}
 	return ""
+}
+
+// qualifiedGoType converts a bare Go type name (e.g. "int16") to its
+// ads-package-qualified form (e.g. "ads.Int16") for use in generated code
+// that lives in an external package importing ads.
+func qualifiedGoType(goType string) string {
+	if q, ok := goTypeQualified[goType]; ok {
+		return q
+	}
+	return goType // time.Time, interface{}, struct names, etc. stay as-is
+}
+
+var goTypeQualified = map[string]string{
+	"int8":    "ads.Int8",
+	"int16":   "ads.Int16",
+	"int32":   "ads.Int32",
+	"int64":   "ads.Int64",
+	"uint8":   "ads.Uint8",
+	"uint16":  "ads.Uint16",
+	"uint32":  "ads.Uint32",
+	"uint64":  "ads.Uint64",
+	"float32": "ads.Float32",
+	"float64": "ads.Float64",
+	"bool":    "ads.Bool",
+	"string":  "ads.String",
 }
 
 // =============================================================================

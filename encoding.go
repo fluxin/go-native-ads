@@ -126,7 +126,14 @@ func encodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 	case reflect.Int32:
 		binary.LittleEndian.PutUint32(buf, uint32(v.Int()))
 	case reflect.Int64:
-		binary.LittleEndian.PutUint64(buf, uint64(v.Int()))
+		if dt == "TIME" {
+			// TIME is a duration in milliseconds (uint32).
+			// time.Duration stores nanoseconds as int64.
+			ms := uint32(time.Duration(v.Int()).Milliseconds())
+			binary.LittleEndian.PutUint32(buf, ms)
+		} else {
+			binary.LittleEndian.PutUint64(buf, uint64(v.Int()))
+		}
 	case reflect.Uint8:
 		buf[0] = uint8(v.Uint())
 	case reflect.Uint16:
@@ -163,11 +170,6 @@ func encodeTimeValue(v reflect.Value, buf []byte, dt string) error {
 	t := v.Interface().(time.Time)
 
 	switch dt {
-	case "TIME":
-		// Milliseconds since midnight minus 1 hour (TwinCAT epoch)
-		midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-		ms := uint32(t.Sub(midnight).Milliseconds())
-		binary.LittleEndian.PutUint32(buf, ms)
 	case "TOD", "TIME_OF_DAY":
 		// Same as TIME but usually just time portion
 		midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
@@ -301,7 +303,14 @@ func decodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 	case reflect.Int32:
 		v.SetInt(int64(int32(binary.LittleEndian.Uint32(buf))))
 	case reflect.Int64:
-		v.SetInt(int64(binary.LittleEndian.Uint64(buf)))
+		if dt == "TIME" {
+			// TIME is a duration in milliseconds (uint32).
+			// Decode to time.Duration (nanoseconds as int64).
+			ms := binary.LittleEndian.Uint32(buf)
+			v.SetInt(int64(time.Duration(ms) * time.Millisecond))
+		} else {
+			v.SetInt(int64(binary.LittleEndian.Uint64(buf)))
+		}
 	case reflect.Uint8:
 		v.SetUint(uint64(buf[0]))
 	case reflect.Uint16:
@@ -339,11 +348,6 @@ func decodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 // decodeTimeValue decodes a binary time value to time.Time
 func decodeTimeValue(v reflect.Value, buf []byte, dt string) error {
 	switch dt {
-	case "TIME":
-		ms := binary.LittleEndian.Uint32(buf)
-		// TwinCAT TIME is milliseconds since midnight minus 1 hour
-		t := time.Unix(0, int64(ms)*int64(time.Millisecond)-int64(time.Hour))
-		v.Set(reflect.ValueOf(t))
 	case "TOD", "TIME_OF_DAY":
 		ms := binary.LittleEndian.Uint32(buf)
 		t := time.Unix(0, int64(ms)*int64(time.Millisecond)-int64(time.Hour))

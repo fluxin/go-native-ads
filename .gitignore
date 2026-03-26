@@ -22,5 +22,7 @@ _testmain.go
 *.exe
 *.test
 *.prof
+cmd/codegen/codegen
 [Dd]ebug
 third_party
+MQTT.md

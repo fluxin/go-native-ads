@@ -80,6 +80,7 @@ func main() {
 		{name: "Struct round-trips (TestStruct, NUMBA)", fn: testStructs},
 		{name: "INT array and element handles", fn: testIntArray},
 		{name: "ArrayOfStructs field coverage", fn: testArrayOfStructs},
+		{name: "ArrayOfStructs whole-array read/write", fn: testArrayOfStructsWholeArray},
 		{name: "Batch read/write", fn: testBatchReadWrite},
 		{name: "Notifications (on-change and cyclic)", fn: testNotifications},
 		{name: "Type safety and expected failures", fn: testTypeSafety},
@@ -486,6 +487,45 @@ func testArrayOfStructs(conn *ads.Connection) error {
 		}
 		if err := writeReadExact(moarArray0, ads.Float64(9.25*scale)); err != nil {
 			return fmt.Errorf("%s.moar.test_array_st[0]: %w", prefix, err)
+		}
+	}
+
+	return nil
+}
+
+func testArrayOfStructsWholeArray(conn *ads.Connection) error {
+	arrHandle, err := ads.GetHandle[[5]Numba](conn, "MAIN.ArrayOfStructs")
+	if err != nil {
+		return err
+	}
+
+	var expected [5]Numba
+	for i := range expected {
+		scale := float64(i + 1)
+		expected[i] = Numba{
+			More:    ads.Float64(11.11 * scale),
+			Dizasta: ads.Int16((i + 1) % 2),
+			Bleeks:  ads.Uint32(1000 + uint32(i) + 1),
+			Moar: TestStruct{
+				I: ads.Int16(700 + int16(i) + 1),
+				B: ads.Float32(3.5 * float32(i+1)),
+			},
+		}
+		expected[i].Moar.TestArraySt[0] = ads.Float64(9.25 * scale)
+	}
+
+	if err := arrHandle.Write(expected); err != nil {
+		return fmt.Errorf("write whole array: %w", err)
+	}
+
+	actual, err := arrHandle.Read()
+	if err != nil {
+		return fmt.Errorf("read whole array: %w", err)
+	}
+
+	for i := range expected {
+		if !equalNumba(actual[i], expected[i]) {
+			return fmt.Errorf("element [%d] mismatch\nexpected: %+v\nactual:   %+v", i, expected[i], actual[i])
 		}
 	}
 

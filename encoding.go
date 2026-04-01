@@ -79,13 +79,6 @@ func encodeArrayField(v reflect.Value, child *Symbol, data []byte, datatypes map
 		return fmt.Errorf("array %s has no element metadata", child.Name)
 	}
 
-	// Get array element info
-	var elemSize uint32
-	for _, elemChild := range elements {
-		elemSize = elemChild.Length
-		break // All elements have same type/size
-	}
-
 	if v.Len() != len(elements) {
 		return generateArrayMismatchError(child.Name, child, v.Len(), len(elements), datatypes)
 	}
@@ -95,8 +88,7 @@ func encodeArrayField(v reflect.Value, child *Symbol, data []byte, datatypes map
 		elemValue := v.Index(i)
 		elemChild := elements[i]
 
-		offset := int(elemChild.Offset)
-		if err := encodePrimitiveField(elemValue, elemChild, data[offset:offset+int(elemSize)], datatypes); err != nil {
+		if err := encodeField(elemValue, elemChild, data, datatypes); err != nil {
 			return fmt.Errorf("failed to encode array element %d: %w", i, err)
 		}
 	}
@@ -260,13 +252,6 @@ func decodeArrayField(v reflect.Value, child *Symbol, data []byte, datatypes map
 		return fmt.Errorf("array %s has no element metadata", child.Name)
 	}
 
-	// Get array element info
-	var elemSize uint32
-	for _, elemChild := range elements {
-		elemSize = elemChild.Length
-		break
-	}
-
 	if v.Len() != len(elements) {
 		return generateArrayMismatchError(child.Name, child, v.Len(), len(elements), datatypes)
 	}
@@ -276,8 +261,7 @@ func decodeArrayField(v reflect.Value, child *Symbol, data []byte, datatypes map
 		elemValue := v.Index(i)
 		elemChild := elements[i]
 
-		offset := int(elemChild.Offset)
-		if err := decodePrimitiveField(elemValue, elemChild, data[offset:offset+int(elemSize)], datatypes); err != nil {
+		if err := decodeField(elemValue, elemChild, data, datatypes); err != nil {
 			return fmt.Errorf("failed to decode array element %d: %w", i, err)
 		}
 	}

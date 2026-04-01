@@ -56,6 +56,8 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 - AMS/TCP router note frames are parsed and exposed through route diagnostics helpers.
 - `SumRead`/`SumWrite` are sent through `ReadWrite` with `GroupSumupRead (0xF080)` and `GroupSumupWrite (0xF081)`.
 - Primitive and `time.Time` handles are validated at acquisition; struct/array shape validation occurs during encode/decode.
+- Array encode/decode delegates per-element dispatch through `encodeField`/`decodeField`, supporting primitives, structs, and nested arrays as element types.
+- Type mismatch errors in encode/decode include symbol name, Go type, and ADS type.
 - Notifications encode `CycleTime` and `MaxDelay` as 100ns ADS ticks.
 - Max sum command count is fixed at 500.
 - Route helper support includes UDP-based NetID discovery and credentialed PLC route creation.
@@ -63,7 +65,7 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 ## Current validation assets
 
 - Focused root tests cover reconnect retry/recovery, restore replay flow, unknown-notification cleanup policy behavior, notification timing, sum parser behavior, shared command response parsing, array lower-bound handling, nested array field offsets, and time-handle type validation.
-- `examples/simple/main.go` is the live PLC smoke harness and is intended for integration verification only.
+- `examples/simple/main.go` is the live PLC smoke harness (12 tests) and is intended for integration verification only. Includes whole-array-of-structs read/write coverage.
 - `examples/add_route/main.go` is the route-helper smoke harness for NetID discovery and credentialed PLC route creation.
 
 ## Open work

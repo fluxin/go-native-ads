@@ -149,9 +149,9 @@ func encodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 		if v.Type().String() == "time.Time" {
 			return encodeTimeValue(v, buf, dt)
 		}
-		return fmt.Errorf("unsupported struct type for encoding: %s", v.Type())
+		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", child.Name, v.Type(), child.DataType)
 	default:
-		return fmt.Errorf("unsupported kind for encoding: %s", v.Kind())
+		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", child.Name, v.Type(), child.DataType)
 	}
 
 	return nil
@@ -321,9 +321,9 @@ func decodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 		if v.Type().String() == "time.Time" {
 			return decodeTimeValue(v, buf, dt)
 		}
-		return fmt.Errorf("unsupported struct type for decoding: %s", v.Type())
+		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", child.Name, v.Type(), child.DataType)
 	default:
-		return fmt.Errorf("unsupported kind for decoding: %s", v.Kind())
+		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", child.Name, v.Type(), child.DataType)
 	}
 
 	return nil

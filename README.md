@@ -10,9 +10,9 @@ based on my original implementation and cleaned up for modern golang. Generics a
 - Reconnect and subscription restoration foundations are implemented: policy-driven lifecycle hooks, reconnect loop, epoch-based handle rebinding, and subscription replay.
 - Symbol-version change detection and metadata/subscription refresh are implemented via `GroupSymbolVersion` monitoring.
 - Route helpers are implemented for UDP-based NetID discovery and credentialed PLC route creation.
-- `examples/simple/main.go` is now a comprehensive live PLC smoke test that exercises primitives, time values, structs, arrays, batch operations, notifications, and type-safety failures.
+- `examples/simple/main.go` is now a comprehensive live PLC smoke test that exercises primitives, time values, structs, arrays (including whole-array-of-structs read/write), batch operations, notifications, and type-safety failures.
 - `examples/add_route/main.go` provides a focused route helper smoke program.
-- Latest reported live PLC smoke execution passed all checks (10/10).
+- Latest reported live PLC smoke execution passed all checks (12/12).
 
 ## Install
 
@@ -86,7 +86,8 @@ err = router.UnregisterPort(assigned.Port)
 - `SumRead`/`SumWrite` use `ReadWrite` with groups `0xF080` / `0xF081`.
 - Notification `CycleTime` and `MaxDelay` are encoded as ADS ticks (100ns).
 - Primitive and `time.Time` handles are validated at acquisition; struct/array compatibility is validated during encode/decode.
-- Array encoding/decoding uses symbol child ordering and supports non-zero lower bounds.
+- Array encoding/decoding uses symbol child ordering, supports non-zero lower bounds, and handles all element types (primitives, structs, nested arrays).
+- Type mismatch errors include the symbol name, Go type, and ADS type for quick diagnosis.
 
 ## Supported mapping
 

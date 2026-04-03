@@ -23,8 +23,12 @@ go get codeberg.org/fluxin/go-native-ads
 ## API snapshot
 
 ```go
-reconnect := ads.ReconnectPolicy{Enabled: true}
-conn, err := ads.NewConnection(ctx, ip, routerPort, targetNetID, targetAMSPort, localNetID, localAMSPort, false, reconnect)
+conn, err := ads.NewConnection(ctx, ads.ConnectionOptions{
+    IP:              "192.168.1.100",       // AMS router address (default: "127.0.0.1")
+    NetID:           "192.168.1.100.1.1",   // target AMS Net ID (use "localhost" or "" for local)
+    AMSPort:         851,                   // target AMS port (851 = TC3 PLC Runtime 1)
+    ReconnectPolicy: ads.ReconnectPolicy{Enabled: true},
+})
 err = conn.Connect()
 defer conn.Close()
 
@@ -112,7 +116,13 @@ go test ./...
 go vet ./...
 ```
 
-Live PLC smoke test:
+Live PLC smoke test (local):
+
+```bash
+go run examples/simple/main.go
+```
+
+Live PLC smoke test (remote):
 
 ```bash
 go run examples/simple/main.go -ip=<PLC_IP> -netid=<PLC_NETID>

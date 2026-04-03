@@ -7,7 +7,7 @@
 ## Public API snapshot
 
 ```go
-ads.NewConnection(ctx, ip, port, targetNetID, targetAMSPort, localNetID, localAMSPort, local, reconnectPolicy) (*Connection, error)
+ads.NewConnection(ctx, ConnectionOptions) (*Connection, error)
 (*Connection).Connect() error
 (*Connection).Close()
 
@@ -78,7 +78,7 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 - Locality of Behavior: keep lifecycle/reconnect behavior in lifecycle-specific code; avoid spreading reconnect conditionals across command files.
 - Data-driven design: represent replayable runtime state as explicit specs (e.g., subscription specs) and reconstruct behavior from data after reconnect.
 - Semantic compression: consolidate protocol framing/parsing into shared helpers and typed packet structs; avoid duplicated byte-layout logic.
-- Compatibility-first evolution: preserve existing exported API shape whenever possible; add new capabilities as additive APIs and options.
+- Options-based API: `NewConnection` uses a `ConnectionOptions` struct; `local` is inferred from the target NetID, source address defaults to router-assigned. Prefer options structs for new APIs with multiple parameters.
 
 ## Reference projects
 

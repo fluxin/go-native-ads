@@ -43,12 +43,10 @@ type testCase struct {
 }
 
 var (
-	ip         = flag.String("ip", "127.0.0.1", "AMS router address")
-	netid      = flag.String("netid", "199.4.42.250.1.1", "target AMS NetID")
-	port       = flag.Int("port", 48898, "target AMS router port")
-	localNetid = flag.String("localNetId", "172.30.0.2.1.1", "local AMS NetID")
-	localPort  = flag.Int("localPort", 10500, "local AMS port")
-	testRoute  = flag.Bool("test-route-helper", false, "run UDP NetID discovery smoke check")
+	ip        = flag.String("ip", "127.0.0.1", "AMS router address")
+	netid     = flag.String("netid", "localhost", "target AMS NetID (use 'localhost' for local)")
+	port      = flag.Int("port", 48898, "AMS router TCP port")
+	testRoute = flag.Bool("test-route-helper", false, "run UDP NetID discovery smoke check")
 )
 
 func main() {
@@ -57,7 +55,12 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	conn, err := ads.NewConnection(ctx, *ip, *port, *netid, 851, *localNetid, *localPort, false, ads.DefaultReconnectPolicy())
+	conn, err := ads.NewConnection(ctx, ads.ConnectionOptions{
+		IP:      *ip,
+		Port:    *port,
+		NetID:   *netid,
+		AMSPort: 851,
+	})
 	if err != nil {
 		failf("create connection: %v", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -77,19 +78,53 @@ type Connection struct {
 	testDeleteUnknownNotificationFn func(uint32) error
 }
 
-// NewConnection creates a new ADS connection
-func NewConnection(ctx context.Context, ip string, port int, netid string, amsPort int, localNetID string, localPort int, local bool, reconnectPolicy ReconnectPolicy) (conn *Connection, err error) {
-	conn = &Connection{ip: ip, port: port, local: local}
-	conn.target.NetID, err = stringToNetID(netid)
+const localhostNetID = "127.0.0.1.1.1"
+
+// ConnectionOptions configures an ADS connection.
+type ConnectionOptions struct {
+	// IP is the AMS router address. Defaults to "127.0.0.1".
+	IP string
+	// Port is the AMS router TCP port. Defaults to 48898.
+	Port int
+	// NetID is the target AMS Net ID (e.g., "192.168.1.100.1.1").
+	// Use "localhost" or "" for local connections.
+	NetID string
+	// AMSPort is the target AMS port (e.g., 851 for the first PLC runtime).
+	AMSPort int
+	// SourceNetID is the local AMS Net ID. If empty, the router assigns one.
+	SourceNetID string
+	// SourcePort is the local AMS port. If zero, the router assigns one.
+	SourcePort int
+	// ReconnectPolicy controls automatic reconnection. Zero value uses DefaultReconnectPolicy().
+	ReconnectPolicy ReconnectPolicy
+}
+
+// NewConnection creates a new ADS connection.
+func NewConnection(ctx context.Context, opts ConnectionOptions) (conn *Connection, err error) {
+	if opts.Port == 0 {
+		opts.Port = 48898
+	}
+	if opts.IP == "" {
+		opts.IP = "127.0.0.1"
+	}
+	if opts.NetID == "" || opts.NetID == "localhost" {
+		opts.NetID = localhostNetID
+	}
+
+	conn = &Connection{ip: opts.IP, port: opts.Port}
+	conn.local = opts.NetID == localhostNetID
+	conn.target.NetID, err = stringToNetID(opts.NetID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target NetID: %w", err)
 	}
-	conn.target.Port = uint16(amsPort)
-	conn.source.NetID, err = stringToNetID(localNetID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid source NetID: %w", err)
+	conn.target.Port = uint16(opts.AMSPort)
+	if opts.SourceNetID != "" {
+		conn.source.NetID, err = stringToNetID(opts.SourceNetID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source NetID: %w", err)
+		}
 	}
-	conn.source.Port = uint16(localPort)
+	conn.source.Port = uint16(opts.SourcePort)
 	conn.systemResponse = make(chan []byte)
 	conn.activeRequests = map[uint32]chan []byte{}
 	conn.activeNotifications = make(map[uint32]NotificationCallback)
@@ -98,7 +133,7 @@ func NewConnection(ctx context.Context, ip string, port int, netid string, amsPo
 	conn.notificationToSubID = make(map[uint32]uint64)
 	conn.sendChannel = make(chan []byte)
 	conn.reconnectSignal = make(chan struct{}, 1)
-	conn.reconnectPolicy = normalizeReconnectPolicy(reconnectPolicy)
+	conn.reconnectPolicy = normalizeReconnectPolicy(opts.ReconnectPolicy)
 	conn.state = connectionStateDisconnected
 	conn.ctx, conn.shutdown = context.WithCancel(ctx)
 	return conn, nil
@@ -132,7 +167,11 @@ func (conn *Connection) connectWithMetadata() error {
 		conn.ip = "127.0.0.1"
 	}
 	var err error
-	conn.connection, err = net.Dial("tcp", net.JoinHostPort(conn.ip, strconv.Itoa(conn.port)))
+	if conn.local && runtime.GOOS == "linux" {
+		conn.connection, err = net.Dial("unix", "/run/ams/tcsyssrv.ams.sock")
+	} else {
+		conn.connection, err = net.Dial("tcp", net.JoinHostPort(conn.ip, strconv.Itoa(conn.port)))
+	}
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", conn.ip, err)
 	}

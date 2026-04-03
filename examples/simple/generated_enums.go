@@ -3,9 +3,9 @@
 
 package main
 
-// MAINArrayOfStructs represents TwinCAT array type ARRAY [1..5] OF NUMBA
-// Symbol: MAIN.ArrayOfStructs
-type MAINArrayOfStructs [5]NUMBA
+// MAINTheetest represents TwinCAT TESTE variable
+// Symbol: MAIN.theetest
+type MAINTheetest TESTE
 
 // TESTE represents TwinCAT enum TESTE
 type TESTE int16

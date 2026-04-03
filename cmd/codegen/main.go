@@ -20,11 +20,9 @@ func init() {
 }
 
 var (
-	ip          = flag.String("ip", "127.0.0.1", "the address to the AMS router")
-	netid       = flag.String("netid", "199.4.42.250.1.1", "AMS NetID of the target")
-	port        = flag.Int("port", 48898, "AMS Port of the target")
-	localNetid  = flag.String("localNetId", "172.30.0.2.1.1", "AMS NetID of the local")
-	localPort   = flag.Int("localPort", 10500, "AMS Port of the local")
+	ip    = flag.String("ip", "127.0.0.1", "the address to the AMS router")
+	netid = flag.String("netid", "localhost", "AMS NetID of the target (use 'localhost' for local)")
+	port  = flag.Int("port", 48898, "AMS router TCP port")
 	output      = flag.String("o", "generated_types.go", "Output file for generated Go code")
 	symbols     = flag.String("symbols", "", "Comma-separated list of symbols to generate (e.g., MAIN.i,MAIN.b,MAIN.eeks)")
 	packageName = flag.String("pkg", "main", "Package name for generated code")
@@ -47,7 +45,12 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	connection, err := ads.NewConnection(ctx, *ip, *port, *netid, 851, *localNetid, *localPort, false, ads.DefaultReconnectPolicy())
+	connection, err := ads.NewConnection(ctx, ads.ConnectionOptions{
+		IP:      *ip,
+		Port:    *port,
+		NetID:   *netid,
+		AMSPort: 851,
+	})
 	if err != nil {
 		slog.Error("Failed to create connection", "error", err)
 		os.Exit(1)

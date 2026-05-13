@@ -56,6 +56,10 @@ type Connection struct {
 	shutdown  context.CancelFunc
 	waitGroup sync.WaitGroup
 
+	transportLock   sync.Mutex
+	transportCancel context.CancelFunc
+	transportGroup  sync.WaitGroup
+
 	connectLock      sync.Mutex
 	stateLock        sync.Mutex
 	state            connectionState
@@ -79,6 +83,7 @@ type Connection struct {
 	testRestoreLookupSymbolFn       func(string) (*Symbol, error)
 	testRestoreAddNotificationFn    func(group, offset, length uint32, mode TransMode, maxDelay, cycleTime time.Duration) (uint32, error)
 	testDeleteUnknownNotificationFn func(uint32) error
+	testUnknownNotificationDelay    time.Duration
 }
 
 const (
@@ -199,14 +204,20 @@ func (conn *Connection) connectWithMetadata() error {
 	}
 	network, address := conn.dialTarget()
 	dialer := net.Dialer{}
-	var err error
-	conn.connection, err = dialer.DialContext(conn.ctx, network, address)
+	connection, err := dialer.DialContext(conn.ctx, network, address)
 	if err != nil {
 		return fmt.Errorf("dial %s %s: %w", network, address, err)
 	}
+	transportCtx := conn.activateTransport(connection)
+	connected := false
+	defer func() {
+		if !connected {
+			conn.stopTransport()
+		}
+	}()
+
 	slog.Debug("Connected")
-	conn.listen()
-	go conn.transmitWorker()
+	conn.startTransportWorkers(transportCtx, connection)
 
 	// Negotiate AMS address with the router (only when connecting via the AMS router port).
 	if conn.local || conn.port == 48898 {
@@ -230,7 +241,47 @@ func (conn *Connection) connectWithMetadata() error {
 	conn.datatypes = datatypes
 	conn.symbols = symbols
 	conn.symbolLock.Unlock()
+	connected = true
 	return nil
+}
+
+func (conn *Connection) activateTransport(connection net.Conn) context.Context {
+	conn.stopTransport()
+	ctx, cancel := context.WithCancel(conn.ctx)
+	conn.transportLock.Lock()
+	conn.connection = connection
+	conn.transportCancel = cancel
+	conn.transportLock.Unlock()
+	return ctx
+}
+
+func (conn *Connection) startTransportWorkers(ctx context.Context, connection net.Conn) {
+	conn.transportGroup.Add(2)
+	go func() {
+		defer conn.transportGroup.Done()
+		conn.listen(ctx, connection)
+	}()
+	go func() {
+		defer conn.transportGroup.Done()
+		conn.transmitWorker(ctx, connection)
+	}()
+}
+
+func (conn *Connection) stopTransport() {
+	conn.transportLock.Lock()
+	cancel := conn.transportCancel
+	connection := conn.connection
+	conn.transportCancel = nil
+	conn.connection = nil
+	conn.transportLock.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if connection != nil {
+		_ = connection.Close()
+	}
+	conn.transportGroup.Wait()
 }
 
 func (conn *Connection) dialTarget() (network string, address string) {
@@ -270,10 +321,8 @@ func (conn *Connection) Close() {
 	conn.state = connectionStateClosed
 	conn.stateLock.Unlock()
 	conn.shutdown()
+	conn.stopTransport()
 	slog.Debug("waiting for workers to close")
 	conn.waitGroup.Wait()
 	slog.Debug("ADS connection closed")
-	if conn.connection != nil {
-		conn.connection.Close()
-	}
 }

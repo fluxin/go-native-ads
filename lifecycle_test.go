@@ -158,3 +158,53 @@ func TestNewConnectionRejectsInvalidTransport(t *testing.T) {
 		t.Fatalf("expected invalid transport error")
 	}
 }
+
+func TestStopTransportStopsTransmitWorker(t *testing.T) {
+	ctx := t.Context()
+
+	client, server := net.Pipe()
+	defer server.Close()
+
+	conn := &Connection{
+		ctx:         ctx,
+		sendChannel: make(chan []byte),
+	}
+	transportCtx := conn.activateTransport(client)
+	conn.startTransportWorkers(transportCtx, client)
+	readDone := make(chan struct{})
+	go func() {
+		buf := make([]byte, 1)
+		_, _ = server.Read(buf)
+		close(readDone)
+	}()
+
+	select {
+	case conn.sendChannel <- []byte{0xAA}:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("transmit worker did not consume initial packet")
+	}
+	select {
+	case <-readDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("transmit worker did not write initial packet")
+	}
+
+	conn.stopTransport()
+	done := make(chan struct{})
+	go func() {
+		conn.waitGroup.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("transmit worker did not stop after transport cancellation")
+	}
+
+	select {
+	case conn.sendChannel <- []byte{0x01}:
+		t.Fatalf("stopped transport worker consumed a new packet")
+	case <-time.After(20 * time.Millisecond):
+	}
+}

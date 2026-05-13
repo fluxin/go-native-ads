@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 const (
@@ -31,7 +32,10 @@ type pendingNotification struct {
 	content   []byte
 }
 
-const maxPendingNotificationsPerHandle = 8
+const (
+	maxPendingNotificationsPerHandle = 8
+	unknownNotificationCleanupDelay  = 5 * time.Second
+)
 
 // deviceNotification - ADS command id: 8
 func (conn *Connection) deviceNotification(ctx context.Context, in []byte) error {
@@ -90,11 +94,7 @@ func (conn *Connection) handleNotification(ctx context.Context, handle uint32, t
 		conn.symbolLock.Unlock()
 		slog.Debug("buffered notification before callback registration", "handle", handle)
 		if policy.DeleteUnknownNotifications {
-			go func(h uint32) {
-				if err := conn.deleteUnknownNotification(h); err != nil {
-					slog.Debug("failed to delete unknown notification handle", "handle", h, "error", err)
-				}
-			}(handle)
+			go conn.deleteUnknownNotificationAfterGrace(handle)
 		}
 		return nil
 	}
@@ -106,6 +106,38 @@ func (conn *Connection) handleNotification(ctx context.Context, handle uint32, t
 		slog.Error("notification callback failed", "handle", handle, "error", err)
 	}
 	return nil
+}
+
+func (conn *Connection) deleteUnknownNotificationAfterGrace(handle uint32) {
+	delay := unknownNotificationCleanupDelay
+	if conn.testUnknownNotificationDelay > 0 {
+		delay = conn.testUnknownNotificationDelay
+	}
+	if delay > 0 {
+		if conn.ctx != nil {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-conn.ctx.Done():
+				return
+			}
+		} else {
+			time.Sleep(delay)
+		}
+	}
+
+	conn.symbolLock.Lock()
+	_, active := conn.activeNotifications[handle]
+	_, pending := conn.pendingNotifications[handle]
+	conn.symbolLock.Unlock()
+	if active || !pending {
+		return
+	}
+
+	if err := conn.deleteUnknownNotification(handle); err != nil {
+		slog.Debug("failed to delete unknown notification handle", "handle", handle, "error", err)
+	}
 }
 
 func (conn *Connection) deleteUnknownNotification(handle uint32) error {

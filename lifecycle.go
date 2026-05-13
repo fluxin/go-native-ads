@@ -125,9 +125,7 @@ func (conn *Connection) reconnectLoop() {
 					break
 				}
 
-				if conn.connection != nil {
-					_ = conn.connection.Close()
-				}
+				conn.stopTransport()
 
 				conn.connectLock.Lock()
 				err := conn.reconnectConnectStep()

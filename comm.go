@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"sync/atomic"
 	"time"
 )
@@ -110,76 +111,76 @@ func (conn *Connection) sendRequest(command CommandID, data []byte) (response []
 	}
 }
 
-func (conn *Connection) listen() <-chan []byte {
-	c := make(chan []byte)
-	go func() {
-		defer close(c)
-		reader := bufio.NewReader(conn.connection)
-		buf := bytes.Buffer{}
-		for {
-			tcpHeader := amsTCPHeader{}
-			data := make([]byte, 6)
-			select {
-			case <-conn.ctx.Done():
-				slog.Info("exit listen")
-				return
-			default:
-				_, err := io.ReadFull(reader, data)
-				if err != nil {
-					slog.Debug("listen loop stopped while reading header", "error", err)
-					conn.onTransportError(err)
-					return
-				}
-			}
-			buf.Write(data)
-			err := binary.Read(&buf, binary.LittleEndian, &tcpHeader)
+func (conn *Connection) listen(ctx context.Context, connection net.Conn) {
+	reader := bufio.NewReader(connection)
+	for {
+		tcpHeader := amsTCPHeader{}
+		data := make([]byte, 6)
+		select {
+		case <-ctx.Done():
+			slog.Info("exit listen")
+			return
+		default:
+			_, err := io.ReadFull(reader, data)
 			if err != nil {
-				slog.Error("error during header read", "error", err)
-				continue
-			}
-			data = make([]byte, tcpHeader.Length)
-			select {
-			case <-conn.ctx.Done():
-				return
-			default:
-				_, err := io.ReadFull(reader, data)
-				if err != nil {
-					slog.Debug("listen loop stopped while reading payload", "error", err)
-					conn.onTransportError(err)
+				if ctx.Err() != nil || conn.ctx.Err() != nil {
 					return
 				}
-			}
-			slog.Debug("routing incoming AMS/TCP frame",
-				"system", tcpHeader.System,
-				"length", tcpHeader.Length)
-			if tcpHeader.System > 0 {
-				systemCommand := uint16(tcpHeader.System)<<8 | uint16(tcpHeader.Unknown1)
-				if systemCommand == amsTCPPortRouterNote {
-					if err := conn.handleRouterNote(data); err != nil {
-						slog.Debug("failed to parse router note", "error", err)
-					}
-					continue
-				}
-				slog.Debug("routing frame to system response channel",
-					"system", tcpHeader.System,
-					"systemCommand", systemCommand,
-					"length", tcpHeader.Length)
-				select {
-				case conn.systemResponse <- data:
-				case <-time.After(100 * time.Millisecond):
-					slog.Error("system response channel blocked; dropped frame")
-					if len(data) >= 33 {
-						cmd := binary.LittleEndian.Uint16(data[32:34])
-						slog.Error("dropped frame command", "command", cmd)
-					}
-				}
-			} else {
-				slog.Debug("routing frame to ADS handler", "length", tcpHeader.Length)
-				go conn.handleReceive(conn.ctx, data)
+				slog.Debug("listen loop stopped while reading header", "error", err)
+				conn.onTransportError(err)
+				return
 			}
 		}
-	}()
-	return c
+		buf := bytes.NewBuffer(data)
+		err := binary.Read(buf, binary.LittleEndian, &tcpHeader)
+		if err != nil {
+			slog.Error("error during header read", "error", err)
+			continue
+		}
+		data = make([]byte, tcpHeader.Length)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			_, err := io.ReadFull(reader, data)
+			if err != nil {
+				if ctx.Err() != nil || conn.ctx.Err() != nil {
+					return
+				}
+				slog.Debug("listen loop stopped while reading payload", "error", err)
+				conn.onTransportError(err)
+				return
+			}
+		}
+		slog.Debug("routing incoming AMS/TCP frame",
+			"system", tcpHeader.System,
+			"length", tcpHeader.Length)
+		if tcpHeader.System > 0 {
+			systemCommand := uint16(tcpHeader.System)<<8 | uint16(tcpHeader.Unknown1)
+			if systemCommand == amsTCPPortRouterNote {
+				if err := conn.handleRouterNote(data); err != nil {
+					slog.Debug("failed to parse router note", "error", err)
+				}
+				continue
+			}
+			slog.Debug("routing frame to system response channel",
+				"system", tcpHeader.System,
+				"systemCommand", systemCommand,
+				"length", tcpHeader.Length)
+			select {
+			case conn.systemResponse <- data:
+			case <-time.After(100 * time.Millisecond):
+				slog.Error("system response channel blocked; dropped frame")
+				if len(data) >= 33 {
+					cmd := binary.LittleEndian.Uint16(data[32:34])
+					slog.Error("dropped frame command", "command", cmd)
+				}
+			}
+		} else {
+			slog.Debug("routing frame to ADS handler", "length", tcpHeader.Length)
+			go conn.handleReceive(ctx, data)
+		}
+	}
 }
 
 func (conn *Connection) handleReceive(ctx context.Context, data []byte) {
@@ -244,26 +245,31 @@ func (conn *Connection) handleReceive(ctx context.Context, data []byte) {
 	}
 }
 
-func (conn *Connection) transmitWorker() {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
-	writer := bufio.NewWriter(conn.connection)
-	ctx, cancel := context.WithCancel(conn.ctx)
-	defer cancel()
+func (conn *Connection) transmitWorker(ctx context.Context, connection net.Conn) {
+	writer := bufio.NewWriter(connection)
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Debug("Exit transmitWorker")
 			return
 		case data := <-conn.sendChannel:
+			if ctx.Err() != nil {
+				return
+			}
 			slog.Debug("Sending bytes", "size", len(data))
 			_, err := writer.Write(data)
 			if err != nil {
+				if ctx.Err() != nil || conn.ctx.Err() != nil {
+					return
+				}
 				slog.Error("Error sending data on conn", "error", err)
 				conn.onTransportError(err)
 				return
 			}
 			if err := writer.Flush(); err != nil {
+				if ctx.Err() != nil || conn.ctx.Err() != nil {
+					return
+				}
 				slog.Error("Error flushing data on conn", "error", err)
 				conn.onTransportError(err)
 				return

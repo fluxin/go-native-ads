@@ -269,6 +269,7 @@ func (h *Handle[T]) Subscribe(updates chan<- Update[T], opts *SubscribeOptions) 
 		o = *opts
 	}
 	o = o.withDefaults()
+	callback := createNotificationCallback[T](h.symbol, h.conn.datatypes, updates)
 
 	adsHandle, err := h.conn.AddDeviceNotification(
 		uint32(GroupSymbolValueByHandle),
@@ -281,8 +282,6 @@ func (h *Handle[T]) Subscribe(updates chan<- Update[T], opts *SubscribeOptions) 
 	if err != nil {
 		return nil, fmt.Errorf("subscribe failed for %s: %w", h.symbolName, err)
 	}
-
-	callback := createNotificationCallback[T](h.symbol, h.conn.datatypes, updates)
 
 	h.conn.symbolLock.Lock()
 	h.conn.nextSubID++

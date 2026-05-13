@@ -161,9 +161,10 @@ func TestUnknownNotificationCleanupPolicy(t *testing.T) {
 	t.Run("enabled", func(t *testing.T) {
 		deleted := make(chan uint32, 1)
 		conn := &Connection{
-			pendingNotifications: make(map[uint32][]pendingNotification),
-			activeNotifications:  make(map[uint32]NotificationCallback),
-			reconnectPolicy:      ReconnectPolicy{DeleteUnknownNotifications: true},
+			pendingNotifications:         make(map[uint32][]pendingNotification),
+			activeNotifications:          make(map[uint32]NotificationCallback),
+			reconnectPolicy:              ReconnectPolicy{DeleteUnknownNotifications: true},
+			testUnknownNotificationDelay: time.Millisecond,
 		}
 		conn.testDeleteUnknownNotificationFn = func(h uint32) error {
 			deleted <- h
@@ -187,9 +188,10 @@ func TestUnknownNotificationCleanupPolicy(t *testing.T) {
 	t.Run("disabled", func(t *testing.T) {
 		called := atomic.Bool{}
 		conn := &Connection{
-			pendingNotifications: make(map[uint32][]pendingNotification),
-			activeNotifications:  make(map[uint32]NotificationCallback),
-			reconnectPolicy:      ReconnectPolicy{DeleteUnknownNotifications: false},
+			pendingNotifications:         make(map[uint32][]pendingNotification),
+			activeNotifications:          make(map[uint32]NotificationCallback),
+			reconnectPolicy:              ReconnectPolicy{DeleteUnknownNotifications: false},
+			testUnknownNotificationDelay: time.Millisecond,
 		}
 		conn.testDeleteUnknownNotificationFn = func(h uint32) error {
 			called.Store(true)
@@ -202,6 +204,32 @@ func TestUnknownNotificationCleanupPolicy(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		if called.Load() {
 			t.Fatalf("unexpected delete call when cleanup policy is disabled")
+		}
+	})
+
+	t.Run("registered during grace", func(t *testing.T) {
+		called := atomic.Bool{}
+		conn := &Connection{
+			pendingNotifications:         make(map[uint32][]pendingNotification),
+			activeNotifications:          make(map[uint32]NotificationCallback),
+			reconnectPolicy:              ReconnectPolicy{DeleteUnknownNotifications: true},
+			testUnknownNotificationDelay: 20 * time.Millisecond,
+		}
+		conn.testDeleteUnknownNotificationFn = func(h uint32) error {
+			called.Store(true)
+			return nil
+		}
+
+		if err := conn.handleNotification(ctx, 456, 1, []byte{0xCC}); err != nil {
+			t.Fatalf("handleNotification failed: %v", err)
+		}
+		conn.symbolLock.Lock()
+		conn.activeNotifications[456] = func(context.Context, uint64, []byte) error { return nil }
+		conn.symbolLock.Unlock()
+
+		time.Sleep(50 * time.Millisecond)
+		if called.Load() {
+			t.Fatalf("unexpected delete call for handle registered during cleanup grace")
 		}
 	})
 }

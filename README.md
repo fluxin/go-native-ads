@@ -28,6 +28,7 @@ conn, err := ads.NewConnection(ctx, ads.ConnectionOptions{
     NetID:           "192.168.1.100.1.1",   // target AMS Net ID (use "localhost" or "" for local)
     AMSPort:         851,                   // target AMS port (851 = TC3 PLC Runtime 1)
     ReconnectPolicy: ads.ReconnectPolicy{Enabled: true},
+    Transport:       ads.ConnectionTransportAuto,
 })
 err = conn.Connect()
 defer conn.Close()
@@ -77,6 +78,16 @@ stateValue, stateKnown, stateUpdated := router.StateSnapshot()
 assigned, err := router.RegisterPort(0)
 err = router.UnregisterPort(assigned.Port)
 ```
+
+## Connection transport
+
+`ConnectionOptions.Transport` controls how the AMS router connection is opened:
+
+- `ads.ConnectionTransportAuto` (default) uses a local Unix socket on Linux when `NetID` is local and the socket exists, otherwise TCP.
+- `ads.ConnectionTransportTCP` always uses `IP:Port`.
+- `ads.ConnectionTransportUnix` always uses `UnixSocketPath`.
+
+`UnixSocketPath` defaults to `/run/ams/tcsyssrv.ams.sock`. Set it when using a nonstandard TwinCAT/AMS router socket path.
 
 ## Verified behavior
 

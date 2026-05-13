@@ -143,7 +143,7 @@ func parseDiscoverNetIDResponse(resp []byte) (string, error) {
 		return "", fmt.Errorf("unexpected discover netid response marker: 0x%02x", resp[11])
 	}
 	parts := make([]string, 6)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		parts[i] = fmt.Sprintf("%d", resp[12+i])
 	}
 	return strings.Join(parts, "."), nil

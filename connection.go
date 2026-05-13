@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
@@ -22,6 +23,8 @@ type Connection struct {
 	port       int
 	connection net.Conn
 	local      bool
+	transport  ConnectionTransport
+	unixSocket string
 
 	// AMS addressing
 	target AmsAddress
@@ -78,7 +81,23 @@ type Connection struct {
 	testDeleteUnknownNotificationFn func(uint32) error
 }
 
-const localhostNetID = "127.0.0.1.1.1"
+const (
+	localhostNetID       = "127.0.0.1.1.1"
+	defaultUnixSocketAMS = "/run/ams/tcsyssrv.ams.sock"
+)
+
+// ConnectionTransport controls how the AMS router connection is established.
+type ConnectionTransport string
+
+const (
+	// ConnectionTransportAuto uses the local Unix socket on Linux when it exists,
+	// otherwise it falls back to TCP.
+	ConnectionTransportAuto ConnectionTransport = ""
+	// ConnectionTransportTCP forces TCP dialing using IP and Port.
+	ConnectionTransportTCP ConnectionTransport = "tcp"
+	// ConnectionTransportUnix forces Unix socket dialing using UnixSocketPath.
+	ConnectionTransportUnix ConnectionTransport = "unix"
+)
 
 // ConnectionOptions configures an ADS connection.
 type ConnectionOptions struct {
@@ -97,6 +116,11 @@ type ConnectionOptions struct {
 	SourcePort int
 	// ReconnectPolicy controls automatic reconnection. Zero value uses DefaultReconnectPolicy().
 	ReconnectPolicy ReconnectPolicy
+	// Transport controls TCP vs local Unix socket dialing. Defaults to auto.
+	Transport ConnectionTransport
+	// UnixSocketPath is used when Transport is unix, or auto selects unix.
+	// Defaults to /run/ams/tcsyssrv.ams.sock.
+	UnixSocketPath string
 }
 
 // NewConnection creates a new ADS connection.
@@ -110,8 +134,16 @@ func NewConnection(ctx context.Context, opts ConnectionOptions) (conn *Connectio
 	if opts.NetID == "" || opts.NetID == "localhost" {
 		opts.NetID = localhostNetID
 	}
+	if opts.UnixSocketPath == "" {
+		opts.UnixSocketPath = defaultUnixSocketAMS
+	}
+	switch opts.Transport {
+	case ConnectionTransportAuto, ConnectionTransportTCP, ConnectionTransportUnix:
+	default:
+		return nil, fmt.Errorf("invalid connection transport: %q", opts.Transport)
+	}
 
-	conn = &Connection{ip: opts.IP, port: opts.Port}
+	conn = &Connection{ip: opts.IP, port: opts.Port, transport: opts.Transport, unixSocket: opts.UnixSocketPath}
 	conn.local = opts.NetID == localhostNetID
 	conn.target.NetID, err = stringToNetID(opts.NetID)
 	if err != nil {
@@ -164,16 +196,13 @@ func (conn *Connection) connectWithMetadata() error {
 	slog.Debug("Dialing", "ip", conn.ip, "port", conn.port)
 	if conn.local {
 		conn.target.NetID = [6]byte{127, 0, 0, 1, 1, 1}
-		conn.ip = "127.0.0.1"
 	}
+	network, address := conn.dialTarget()
+	dialer := net.Dialer{}
 	var err error
-	if conn.local && runtime.GOOS == "linux" {
-		conn.connection, err = net.Dial("unix", "/run/ams/tcsyssrv.ams.sock")
-	} else {
-		conn.connection, err = net.Dial("tcp", net.JoinHostPort(conn.ip, strconv.Itoa(conn.port)))
-	}
+	conn.connection, err = dialer.DialContext(conn.ctx, network, address)
 	if err != nil {
-		return fmt.Errorf("dial %s: %w", conn.ip, err)
+		return fmt.Errorf("dial %s %s: %w", network, address, err)
 	}
 	slog.Debug("Connected")
 	conn.listen()
@@ -202,6 +231,21 @@ func (conn *Connection) connectWithMetadata() error {
 	conn.symbols = symbols
 	conn.symbolLock.Unlock()
 	return nil
+}
+
+func (conn *Connection) dialTarget() (network string, address string) {
+	if conn.transport == ConnectionTransportUnix || conn.shouldAutoDialUnix() {
+		return "unix", conn.unixSocket
+	}
+	return "tcp", net.JoinHostPort(conn.ip, strconv.Itoa(conn.port))
+}
+
+func (conn *Connection) shouldAutoDialUnix() bool {
+	if conn.transport != ConnectionTransportAuto || !conn.local || runtime.GOOS != "linux" {
+		return false
+	}
+	info, err := os.Stat(conn.unixSocket)
+	return err == nil && info.Mode()&os.ModeSocket != 0
 }
 
 // Close closes connection and waits for completion

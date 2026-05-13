@@ -353,7 +353,7 @@ func parseEnumMembers(buf *bytes.Buffer, baseType string, valueSize int) ([]Enum
 	countBytes := buf.Next(2)
 	count := int(binary.LittleEndian.Uint16(countBytes))
 	members := make([]EnumMember, 0, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		if buf.Len() < 1 {
 			return nil, fmt.Errorf("enum member %d name length missing", i)
 		}
@@ -415,7 +415,7 @@ func skipDatatypeMethodInfos(buf *bytes.Buffer) error {
 		return fmt.Errorf("datatype method info count missing")
 	}
 	count := int(binary.LittleEndian.Uint16(buf.Next(2)))
-	for i := 0; i < count; i++ {
+	for i := range count {
 		if buf.Len() < 4 {
 			return fmt.Errorf("datatype method %d entry length missing", i)
 		}
@@ -433,7 +433,7 @@ func skipDatatypeAttributes(buf *bytes.Buffer) error {
 		return fmt.Errorf("datatype attribute count missing")
 	}
 	count := int(binary.LittleEndian.Uint16(buf.Next(2)))
-	for i := 0; i < count; i++ {
+	for i := range count {
 		if buf.Len() < 2 {
 			return fmt.Errorf("datatype attribute %d lengths missing", i)
 		}
@@ -449,7 +449,7 @@ func skipDatatypeAttributes(buf *bytes.Buffer) error {
 }
 
 func skipExtendedEnumInfos(buf *bytes.Buffer, count int) error {
-	for i := 0; i < count; i++ {
+	for i := range count {
 		if buf.Len() < 2 {
 			return fmt.Errorf("extended enum info %d header missing", i)
 		}

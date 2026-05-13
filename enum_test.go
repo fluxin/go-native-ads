@@ -111,7 +111,7 @@ func TestEnumBaseTypeValidationPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected named enum type to validate, got error: %v", err)
 	}
-	if reflect.TypeOf(*new(MyEnum)).Kind() != reflect.Int16 {
+	if reflect.TypeFor[MyEnum]().Kind() != reflect.Int16 {
 		t.Fatalf("test setup failure: MyEnum should be int16 kind")
 	}
 	if h == nil {

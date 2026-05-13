@@ -3,6 +3,9 @@ package ads
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -46,8 +49,7 @@ func TestJitteredBackoffCappedWithoutJitter(t *testing.T) {
 }
 
 func TestOnTransportErrorDisabledReconnect(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	conn := &Connection{
 		ctx:             ctx,
@@ -81,5 +83,78 @@ func TestRouterConnectRequestPacket(t *testing.T) {
 		if packet[i] != expected[i] {
 			t.Fatalf("packet byte mismatch at %d: got 0x%02x, want 0x%02x", i, packet[i], expected[i])
 		}
+	}
+}
+
+func TestConnectionDialTargetTransportModes(t *testing.T) {
+	conn := &Connection{
+		ip:         "192.0.2.10",
+		port:       48898,
+		local:      true,
+		transport:  ConnectionTransportTCP,
+		unixSocket: "/tmp/does-not-matter.sock",
+	}
+	network, address := conn.dialTarget()
+	if network != "tcp" || address != "192.0.2.10:48898" {
+		t.Fatalf("forced TCP dial target mismatch: %s %s", network, address)
+	}
+
+	conn.transport = ConnectionTransportUnix
+	network, address = conn.dialTarget()
+	if network != "unix" || address != conn.unixSocket {
+		t.Fatalf("forced unix dial target mismatch: %s %s", network, address)
+	}
+}
+
+func TestConnectionAutoTransportFallsBackToTCP(t *testing.T) {
+	conn := &Connection{
+		ip:         "127.0.0.1",
+		port:       48898,
+		local:      true,
+		transport:  ConnectionTransportAuto,
+		unixSocket: "/tmp/go-native-ads-missing.sock",
+	}
+	network, address := conn.dialTarget()
+	if network != "tcp" || address != "127.0.0.1:48898" {
+		t.Fatalf("auto fallback dial target mismatch: %s %s", network, address)
+	}
+}
+
+func TestConnectionAutoTransportUsesExistingLinuxSocket(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("auto unix socket selection is linux-only")
+	}
+	path := t.TempDir() + "/ams.sock"
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("test path is not a unix socket: %s", path)
+	}
+
+	conn := &Connection{
+		ip:         "127.0.0.1",
+		port:       48898,
+		local:      true,
+		transport:  ConnectionTransportAuto,
+		unixSocket: path,
+	}
+	network, address := conn.dialTarget()
+	if network != "unix" || address != path {
+		t.Fatalf("auto unix dial target mismatch: %s %s", network, address)
+	}
+}
+
+func TestNewConnectionRejectsInvalidTransport(t *testing.T) {
+	_, err := NewConnection(context.Background(), ConnectionOptions{Transport: ConnectionTransport("bluetooth")})
+	if err == nil {
+		t.Fatalf("expected invalid transport error")
 	}
 }

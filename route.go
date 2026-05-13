@@ -143,7 +143,7 @@ func ParseNetID(value string) ([6]byte, error) {
 
 func FormatNetID(value [6]byte) string {
 	parts := make([]string, 6)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		parts[i] = strconv.Itoa(int(value[i]))
 	}
 	return parts[0] + "." + parts[1] + "." + parts[2] + "." + parts[3] + "." + parts[4] + "." + parts[5]

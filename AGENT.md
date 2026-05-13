@@ -21,6 +21,10 @@ ads.DiscoverNetIDInfo(ctx, ip) (NetIDRouteInfo, error)
 ads.ParseNetID(value) ([6]byte, error)
 ads.FormatNetID(value [6]byte) string
 
+ads.ConnectionTransportAuto
+ads.ConnectionTransportTCP
+ads.ConnectionTransportUnix
+
 (*Connection).GetEnum(typeName string) (EnumInfo, error)
 
 (RouterClient).Diagnostics() RouteDiagnostics
@@ -61,6 +65,7 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 - Notifications encode `CycleTime` and `MaxDelay` as 100ns ADS ticks.
 - Max sum command count is fixed at 500.
 - Route helper support includes UDP-based NetID discovery and credentialed PLC route creation.
+- Local Linux AMS transport is configurable: auto mode uses `/run/ams/tcsyssrv.ams.sock` when present and falls back to TCP; callers can force TCP or Unix socket transport through `ConnectionOptions`.
 
 ## Current validation assets
 
@@ -78,7 +83,7 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 - Locality of Behavior: keep lifecycle/reconnect behavior in lifecycle-specific code; avoid spreading reconnect conditionals across command files.
 - Data-driven design: represent replayable runtime state as explicit specs (e.g., subscription specs) and reconstruct behavior from data after reconnect.
 - Semantic compression: consolidate protocol framing/parsing into shared helpers and typed packet structs; avoid duplicated byte-layout logic.
-- Options-based API: `NewConnection` uses a `ConnectionOptions` struct; `local` is inferred from the target NetID, source address defaults to router-assigned. Prefer options structs for new APIs with multiple parameters.
+- Options-based API: `NewConnection` uses a `ConnectionOptions` struct; `local` is inferred from the target NetID, source address defaults to router-assigned, and transport can be auto/TCP/Unix socket. Prefer options structs for new APIs with multiple parameters.
 
 ## Reference projects
 

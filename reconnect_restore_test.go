@@ -9,8 +9,7 @@ import (
 )
 
 func TestReconnectLoopRetriesThenRecovers(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	var attempts atomic.Int32
 	var refreshed atomic.Int32
@@ -51,8 +50,7 @@ func TestReconnectLoopRetriesThenRecovers(t *testing.T) {
 }
 
 func TestReconnectLoopStopsAtMaxAttempts(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	var attempts atomic.Int32
 	conn := &Connection{

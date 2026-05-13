@@ -207,8 +207,8 @@ func countLeafFields(t reflect.Type) int {
 	}
 
 	count := 0
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
+	for field := range t.Fields() {
+		field := field
 		if field.Type.Kind() == reflect.Struct && field.Type.NumField() > 0 {
 			count += countLeafFields(field.Type)
 		} else {

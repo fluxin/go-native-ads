@@ -1,6 +1,8 @@
-Performance validation, 2026-09-25
+# Performance validation
 
-Matched CPU-only benchmarks compare the pre-hardening source at `dca2259b` with the hardened codec and response parser. Both runs used the same fixtures and Go 1.27.1 on Linux/amd64, AMD Ryzen 9 9900X3D, default logging, `-benchtime=500ms -count=3`. Runs were sequential. The table gives medians; allocation counts were identical across repetitions.
+Measured on 2026-09-25 for the hardening included in v0.1.0. The canonical module is `github.com/fluxin/go-native-ads`.
+
+Matched CPU-only benchmarks compare the pre-hardening source at `dca2259b` with the hardened codec and response parser at `8e5d955e` (before the module-path migration). Both runs used the same fixtures and Go 1.27.1 on Linux/amd64, AMD Ryzen 9 9900X3D, default logging, `-benchtime=500ms -count=3`. Runs were sequential. The table gives medians; allocation counts were identical across repetitions.
 
 | Operation | Before | After | Before allocations | After allocations |
 | --- | ---: | ---: | ---: | ---: |

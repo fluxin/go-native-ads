@@ -2,7 +2,14 @@
 
 ## Purpose
 
-`go-native-ads` is a pure-Go TwinCAT ADS client (`codeberg.org/fluxin/go-native-ads`) with no C dependencies.
+`go-native-ads` is a pure-Go TwinCAT ADS client (`github.com/fluxin/go-native-ads`) with no C dependencies.
+
+## Repository and release
+
+- Canonical repository/module: `github.com/fluxin/go-native-ads`.
+- Current release: `v0.1.0`; Go 1.26 or newer. See `CHANGELOG.md` for compatibility changes.
+- Historical `v0.0.1`–`v0.0.6` tags retain the Codeberg module path; do not retag or rewrite them.
+- The CLI and examples are separate modules with local replacements. Test/vet each module as shown in `README.md`; root `./...` does not cover them.
 
 ## Public API snapshot
 
@@ -44,6 +51,9 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 
 (*Handle[T]).Subscribe(chan<- Update[T], *SubscribeOptions) (*Subscription, error)
 (*Subscription).Cancel() error
+(*Subscription).Err() error
+(*Subscription).Dropped() uint64
+(*Subscription).Retry() error
 
 (*Connection).GenerateType(symbolName string) (string, error)
 (*Connection).GenerateStructBody(symbolName string) (string, error)
@@ -75,7 +85,7 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 
 ## Open work
 
-- Immediate focus: rerun live PLC smoke and exercise reconnect/online schema changes on a real target; offline socket and race regression gates cover the hardened implementation.
+- Immediate focus: rerun v0.1.0 live PLC smoke and exercise reconnect/online schema changes on a real target; offline socket and race regression gates cover the hardened implementation.
 - Deferred extras: RPC invocation support.
 
 ## Core style and implementation patterns

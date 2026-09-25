@@ -1,9 +1,11 @@
 # go-native-ads
 
-Pure-Go TwinCAT ADS client (`codeberg.org/fluxin/go-native-ads`).
+Pure-Go TwinCAT ADS client ([github.com/fluxin/go-native-ads](https://github.com/fluxin/go-native-ads)). Requires Go 1.26 or newer.
 based on my original implementation and cleaned up for modern golang. Generics and handle IO added by myself, codegen, docs, tests, and additional features thankfully supported by AI.
 
 ## Current status
+
+Current release: **v0.1.0**. See [CHANGELOG.md](CHANGELOG.md) for migration and compatibility notes, [PERFORMANCE.md](PERFORMANCE.md) for measured CPU improvements, and [PLAN.md](PLAN.md) for remaining work.
 
 - Core behavior is implemented: connect, typed handle read/write, batch read/write (sum commands), notifications, symbol/type upload, and code generation.
 - Recent protocol/correctness fixes are in place for notification timing, sum parsing, command response validation, and array metadata handling.
@@ -17,17 +19,31 @@ based on my original implementation and cleaned up for modern golang. Generics a
 ## Install
 
 ```bash
-go get codeberg.org/fluxin/go-native-ads
+go get github.com/fluxin/go-native-ads@v0.1.0
 ```
+
+Import the package as `ads`:
+
+```go
+import ads "github.com/fluxin/go-native-ads"
+```
+
+## Migrating from Codeberg
+
+Replace `codeberg.org/fluxin/go-native-ads` imports with `github.com/fluxin/go-native-ads`, run the install command above, then run `go mod tidy` in each consuming module. Update any `replace` directives and regenerate generated files or update their ADS import path. Avoid mixing the two module paths: Go treats them as different packages.
+
+The GitHub history includes the original `v0.0.1`–`v0.0.6` tags unchanged; those versions still declare the Codeberg module path. **v0.1.0 is the first release using the GitHub module path.**
 
 ## API snapshot
 
 ```go
+policy := ads.DefaultReconnectPolicy()
+policy.Enabled = true
 conn, err := ads.NewConnection(ctx, ads.ConnectionOptions{
     IP:              "192.168.1.100",       // AMS router address (default: "127.0.0.1")
     NetID:           "192.168.1.100.1.1",   // target AMS Net ID (use "localhost" or "" for local)
     AMSPort:         851,                   // target AMS port (851 = TC3 PLC Runtime 1)
-    ReconnectPolicy: ads.ReconnectPolicy{Enabled: true},
+    ReconnectPolicy: policy,
     Transport:       ads.ConnectionTransportAuto,
 })
 err = conn.Connect()
@@ -102,12 +118,16 @@ err = router.UnregisterPort(assigned.Port)
 
 ## Code generation
 
-The CLI emits formatted standalone Go files with required imports, inline nested struct definitions, multidimensional arrays, enums, and aliases for time types. Identifier collisions are rejected. Run it from its own module:
+The CLI emits formatted standalone Go files with required imports, inline nested struct definitions, multidimensional arrays, enums, and aliases for time types. Identifier collisions are rejected. Clone the release and run the CLI from its own module against a reachable PLC. Replace the output path with a file inside your application:
 
 ```bash
-cd cmd/codegen
-go run . -symbols=MAIN.counter,MAIN.values -o=generated_types.go -pkg=plc
+git clone --branch v0.1.0 https://github.com/fluxin/go-native-ads.git
+cd go-native-ads/cmd/codegen
+go run . -ip=192.168.1.100 -netid=192.168.1.100.1.1 \
+  -symbols=MAIN.counter,MAIN.values -o=/path/to/your/app/generated_types.go -pkg=plc
 ```
+
+The CLI targets PLC runtime port 851. Its `-port` flag changes the AMS router TCP port (default 48898). Generated ADS imports use the GitHub module path. The CLI and examples have local `replace` directives so checkout builds use the matching root source.
 
 ## Verified behavior
 
@@ -153,7 +173,7 @@ go test -run='^$' -bench=BenchmarkReview -benchmem
 go test -run='^$' -fuzz=FuzzDatatypeUpload -fuzztime=10s
 ```
 
-The root module does not include the nested CLI/example modules in its ./... traversal.
+Run these commands from the repository root. The root module does not include the nested CLI/example modules in its `./...` traversal. Root tests use local TCP/Unix sockets; they do not contact a PLC. See [PERFORMANCE.md](PERFORMANCE.md) for benchmark scope and recorded results.
 
 Live PLC smoke tests (these write PLC values):
 

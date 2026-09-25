@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	ads "codeberg.org/fluxin/go-native-ads"
+	ads "github.com/fluxin/go-native-ads"
 )
 
 func main() {

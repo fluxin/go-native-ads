@@ -25,7 +25,7 @@ func TestGeneratedFileCompiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Clean(filepath.Join(cwd, "../.."))
-	module := "module generated\n\ngo 1.26\nrequire codeberg.org/fluxin/go-native-ads v0.0.0\nreplace codeberg.org/fluxin/go-native-ads => " + filepath.ToSlash(root) + "\n"
+	module := "module generated\n\ngo 1.26\nrequire github.com/fluxin/go-native-ads v0.1.0\nreplace github.com/fluxin/go-native-ads => " + filepath.ToSlash(root) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
 	}

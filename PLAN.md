@@ -1,6 +1,6 @@
 # go-native-ads: TODO Plan
 
-Only open work items are listed here.
+Only open work items are listed here. The v0.1.0 GitHub migration, offline hardening, and codegen fixes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Immediate TODOs
 

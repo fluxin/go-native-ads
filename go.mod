@@ -1,3 +1,3 @@
-module codeberg.org/fluxin/go-native-ads
+module github.com/fluxin/go-native-ads
 
 go 1.26

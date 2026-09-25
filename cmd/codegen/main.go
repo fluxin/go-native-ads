@@ -15,7 +15,7 @@ import (
 	"strings"
 	"unicode"
 
-	ads "codeberg.org/fluxin/go-native-ads"
+	ads "github.com/fluxin/go-native-ads"
 )
 
 func init() {
@@ -148,7 +148,7 @@ func generateGoCode(typeCodes []string, pkg string) (string, error) {
 			if id, ok := sel.X.(*ast.Ident); ok {
 				switch id.Name {
 				case "ads":
-					imports["ads"] = "codeberg.org/fluxin/go-native-ads"
+					imports["ads"] = "github.com/fluxin/go-native-ads"
 				case "time":
 					imports["time"] = "time"
 				}

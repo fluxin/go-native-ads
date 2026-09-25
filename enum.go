@@ -24,7 +24,7 @@ func (conn *Connection) GetEnum(typeName string) (EnumInfo, error) {
 	if len(dt.EnumMembers) == 0 {
 		return EnumInfo{}, fmt.Errorf("datatype %s is not an enum", typeName)
 	}
-	baseType, err := resolveType(conn, dt.DataType)
+	baseType, err := resolveDataType(dt.DataType, conn.datatypes)
 	if err != nil {
 		baseType = dt.DataType
 	}

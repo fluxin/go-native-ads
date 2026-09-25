@@ -167,7 +167,7 @@ func TestStopTransportStopsTransmitWorker(t *testing.T) {
 
 	conn := &Connection{
 		ctx:         ctx,
-		sendChannel: make(chan []byte),
+		sendChannel: make(chan outgoingPacket),
 	}
 	transportCtx := conn.activateTransport(client)
 	conn.startTransportWorkers(transportCtx, client)
@@ -179,7 +179,7 @@ func TestStopTransportStopsTransmitWorker(t *testing.T) {
 	}()
 
 	select {
-	case conn.sendChannel <- []byte{0xAA}:
+	case conn.sendChannel <- outgoingPacket{data: []byte{0xAA}}:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatalf("transmit worker did not consume initial packet")
 	}
@@ -192,7 +192,7 @@ func TestStopTransportStopsTransmitWorker(t *testing.T) {
 	conn.stopTransport()
 	done := make(chan struct{})
 	go func() {
-		conn.waitGroup.Wait()
+		conn.transportGroup.Wait()
 		close(done)
 	}()
 
@@ -203,7 +203,7 @@ func TestStopTransportStopsTransmitWorker(t *testing.T) {
 	}
 
 	select {
-	case conn.sendChannel <- []byte{0x01}:
+	case conn.sendChannel <- outgoingPacket{data: []byte{0x01}}:
 		t.Fatalf("stopped transport worker consumed a new packet")
 	case <-time.After(20 * time.Millisecond):
 	}

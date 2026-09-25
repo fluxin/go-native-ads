@@ -3,133 +3,85 @@ package ads
 import (
 	"fmt"
 	"reflect"
+	"sync"
 )
 
-// BatchWriter provides reusable batch writing of struct fields to PLC.
-// Handles are passed as pointers and map to struct fields in declaration order.
+// BatchWriter reuses its command and payload buffers. Concurrent calls are serialized.
 type BatchWriter[T any] struct {
 	conn     *Connection
-	handles  []handleInfo         // Cached handle metadata
-	commands []sumWriteSubCommand // Pre-sized command buffer (reused)
-	fields   []fieldInfo          // Cached struct field info
+	mu       sync.Mutex
+	handles  []handleInfo
+	commands []sumWriteSubCommand
+	fields   []fieldInfo
+	data     []byte
 }
 
-// NewBatchWriter creates a batch writer that maps struct fields to PLC handles.
-// Handles are passed as pointers and must match struct field declaration order.
 func NewBatchWriter[T any](conn *Connection, handles ...any) (*BatchWriter[T], error) {
-	var zero T
-	structType := reflect.TypeOf(zero)
-
-	// Validate T is a struct
-	if structType.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("type parameter must be a struct, got %s", structType.Kind())
+	if conn == nil {
+		return nil, fmt.Errorf("nil connection")
 	}
-
-	// Extract handle info from typed handles
-	handleInfos := make([]handleInfo, len(handles))
-	for i, h := range handles {
-		info, err := extractHandleInfo(h)
-		if err != nil {
-			return nil, fmt.Errorf("handle %d: %w", i, err)
-		}
-		handleInfos[i] = info
+	if err := conn.beginOperation(); err != nil {
+		return nil, err
 	}
-
-	// Count total leaf fields
-	flatFieldCount := countLeafFields(structType)
-
-	// Validate handle count matches field count
-	if len(handles) != flatFieldCount {
-		return nil, fmt.Errorf("handle count mismatch: got %d handles, struct has %d fields",
-			len(handles), flatFieldCount)
+	defer conn.endOperation()
+	infos, fields, err := buildBatch(conn, reflect.TypeFor[T](), handles)
+	if err != nil {
+		return nil, err
 	}
-
-	// Pre-size command buffer (reused across writes)
-	commands := make([]sumWriteSubCommand, len(handleInfos))
-
-	// Cache struct field info for encoding
-	fields := getAllFieldInfo(structType)
-
-	return &BatchWriter[T]{
-		conn:     conn,
-		handles:  handleInfos,
-		commands: commands,
-		fields:   fields,
-	}, nil
+	return &BatchWriter[T]{conn: conn, handles: infos, fields: fields, commands: make([]sumWriteSubCommand, len(infos))}, nil
 }
 
-// Write encodes the source struct and writes all fields to PLC in one batch.
-// All fields are written atomically in the same ADS transaction.
+// Write validates and encodes all fields before sending. The PLC may accept only
+// some subcommands; BatchWriteError reports failures without implying rollback.
 func (bw *BatchWriter[T]) Write(source T) error {
-	sourceValue := reflect.ValueOf(source)
-
-	// Encode each field into command buffer
-	for i, info := range bw.handles {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	if err := bw.conn.beginOperation(); err != nil {
+		return err
+	}
+	defer bw.conn.endOperation()
+	total := uint64(0)
+	for i := range bw.handles {
 		if err := ensureHandleInfoBound(&bw.handles[i]); err != nil {
-			return fmt.Errorf("handle bind failed for %s: %w", bw.handles[i].symbolName, err)
+			return err
 		}
-		info = bw.handles[i]
-		field := bw.fields[i]
-		fieldValue := sourceValue.FieldByIndex(field.index)
-
-		// Allocate data buffer for this field
-		data := make([]byte, info.length)
-		tempSymbol := &Symbol{
-			DataType: info.dataType,
-			Length:   info.length,
-		}
-
-		// Encode field value
-		if err := encodePrimitiveField(fieldValue, tempSymbol, data, bw.conn.datatypes); err != nil {
-			return fmt.Errorf("failed to encode field %s (%s): %w", field.name, info.symbolName, err)
-		}
-
-		// Build command
-		bw.commands[i] = sumWriteSubCommand{
-			Group:  uint32(GroupSymbolValueByHandle),
-			Offset: info.handle,
-			Length: info.length,
-			Data:   data,
-		}
+		total += uint64(bw.handles[i].length)
 	}
-
-	// Execute batch write
-	sumResults, err := bw.conn.SumWrite(bw.commands)
+	if total+uint64(12*len(bw.handles))+48 > uint64(bw.conn.frameLimit()) {
+		return fmt.Errorf("batch payload exceeds frame limit")
+	}
+	if cap(bw.data) < int(total) {
+		bw.data = make([]byte, total)
+	} else {
+		bw.data = bw.data[:total]
+		clear(bw.data)
+	}
+	value := reflect.ValueOf(source)
+	offset := 0
+	for i, h := range bw.handles {
+		data := bw.data[offset : offset+int(h.length)]
+		offset += int(h.length)
+		if err := h.codec.encode(value.FieldByIndex(bw.fields[i].index), data); err != nil {
+			return err
+		}
+		bw.commands[i] = sumWriteSubCommand{Group: uint32(GroupSymbolValueByHandle), Offset: h.handle, Length: h.length, Data: data}
+	}
+	results, err := bw.conn.sumWrite(bw.commands, true)
 	if err != nil {
-		return fmt.Errorf("batch write failed: %w", err)
+		return err
 	}
-
-	// Validate result count
-	if len(sumResults) != len(bw.handles) {
-		return fmt.Errorf("result count mismatch: got %d results for %d handles",
-			len(sumResults), len(bw.handles))
-	}
-
-	// Check for errors
-	errors := make([]BatchFieldError, 0)
-	for i, info := range bw.handles {
-		if sumResults[i].Error != ReturnCodeNoErrors {
-			field := bw.fields[i]
-			errors = append(errors, BatchFieldError{
-				Field:   field.name,
-				Symbol:  info.symbolName,
-				ADSCode: sumResults[i].Error,
-				Message: fmt.Sprintf("ADS error %d", sumResults[i].Error),
-			})
+	var failures []BatchFieldError
+	for i, h := range bw.handles {
+		if results[i].Error != ReturnCodeNoErrors {
+			failures = append(failures, BatchFieldError{Field: bw.fields[i].name, Symbol: h.symbolName, ADSCode: results[i].Error})
 		}
 	}
-
-	if len(errors) > 0 {
-		return &BatchWriteError{
-			FieldErrors: errors,
-			TotalFields: len(bw.handles),
-		}
+	if len(failures) > 0 {
+		return &BatchWriteError{failures, len(bw.handles)}
 	}
-
 	return nil
 }
 
-// BatchWriteError represents errors from a batch write operation.
 type BatchWriteError struct {
 	FieldErrors []BatchFieldError
 	TotalFields int
@@ -138,11 +90,4 @@ type BatchWriteError struct {
 func (e *BatchWriteError) Error() string {
 	return fmt.Sprintf("batch write failed for %d/%d fields", len(e.FieldErrors), e.TotalFields)
 }
-
-// GetFieldErrors returns all field-specific errors from the batch write.
-func (e *BatchWriteError) GetFieldErrors() []BatchFieldError {
-	return e.FieldErrors
-}
-
-// Note: handleInfo, extractHandleInfo, countLeafFields, getAllFieldInfo are defined in batch_reader.go
-// They are reused here for consistency.
+func (e *BatchWriteError) GetFieldErrors() []BatchFieldError { return e.FieldErrors }

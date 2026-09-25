@@ -78,9 +78,11 @@ func (r RouterClient) Diagnostics() RouteDiagnostics {
 	r.conn.routerStateLock.Unlock()
 
 	r.conn.stateLock.Lock()
-	connected := r.conn.state == connectionStateConnected || r.conn.state == connectionStateConnecting || r.conn.state == connectionStateReconnecting
+	connected := r.conn.state == connectionStateConnected
 	r.conn.stateLock.Unlock()
 
+	r.conn.addressLock.RLock()
+	defer r.conn.addressLock.RUnlock()
 	return RouteDiagnostics{
 		RouterAddress: r.conn.ip,
 		RouterPort:    r.conn.port,

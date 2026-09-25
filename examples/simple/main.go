@@ -709,9 +709,7 @@ func waitForUpdate[T any](updates <-chan ads.Update[T], timeout time.Duration) (
 }
 
 func expectedTodTimeDecode(input time.Time) time.Time {
-	midnight := time.Date(input.Year(), input.Month(), input.Day(), 0, 0, 0, 0, input.Location())
-	ms := input.Sub(midnight).Milliseconds()
-	return time.Unix(0, int64(time.Millisecond)*ms-int64(time.Hour))
+	return time.Date(1970, time.January, 1, input.Hour(), input.Minute(), input.Second(), input.Nanosecond()/1000000*1000000, time.UTC)
 }
 
 func testRouteHelperNetID(conn *ads.Connection) error {

@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"log/slog"
-	"sort"
 	"strings"
 	"time"
 )
@@ -27,17 +25,18 @@ type datatypeEntry struct {
 }
 
 type datatypeArrayInfo struct {
-	LBound   uint32
+	LBound   int32
 	Elements uint32
 }
 
 type SymbolUploadDataType struct {
-	DatatypeEntry datatypeEntry
-	Name          string
-	DataType      string
-	Comment       string
-	Children      map[string]*SymbolUploadDataType
-	EnumMembers   []EnumMember
+	arrayContinuation bool
+	DatatypeEntry     datatypeEntry
+	Name              string
+	DataType          string
+	Comment           string
+	Children          map[string]*SymbolUploadDataType
+	EnumMembers       []EnumMember
 }
 
 type EnumMember struct {
@@ -84,6 +83,8 @@ type SymbolUploadInfo struct {
 }
 
 type Symbol struct {
+	cache             *symbolCache
+	arrayContinuation bool
 	FullName          string
 	LastUpdateTime    time.Time
 	MinUpdateInterval time.Duration
@@ -99,60 +100,73 @@ type Symbol struct {
 	Children map[string]*Symbol
 }
 
-func parseUploadSymbolInfoSymbols(data []byte, datatypes map[string]SymbolUploadDataType) (symbols map[string]*Symbol, err error) {
-	symbols = map[string]*Symbol{}
-	buf := bytes.NewBuffer(data)
+const maxMetadataNodes = 100000
 
-	for buf.Len() > 0 {
-		startLen := buf.Len()
-		entry := symbolEntry{}
-		err := binary.Read(buf, binary.LittleEndian, &entry)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read symbol entry: %w", err)
-		}
-
-		name := make([]byte, entry.NameLength)
-		dt := make([]byte, entry.TypeLength)
-		comment := make([]byte, entry.CommentLength)
-
-		err = binary.Read(buf, binary.LittleEndian, name)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read symbol name: %w", err)
-		}
-		buf.Next(1)
-
-		err = binary.Read(buf, binary.LittleEndian, dt)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read symbol type: %w", err)
-		}
-		buf.Next(1)
-
-		err = binary.Read(buf, binary.LittleEndian, comment)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read symbol comment: %w", err)
-		}
-		buf.Next(1)
-		item := symbolUploadSymbol{}
-		item.Name = string(name)
-		item.DataType = string(dt)
-		if len(item.DataType) >= 6 {
-			if item.DataType[:6] == "STRING" {
-				item.DataType = "STRING"
-			}
-		}
-		item.Comment = string(comment)
-		item.SymbolEntry = entry
-		endLen := buf.Len()
-		symbol := addSymbol(item, datatypes)
-
-		symbols[item.Name] = symbol
-		addChildren(symbol, symbols)
-
-		buf.Next(int(item.SymbolEntry.EntryLength) - (startLen - endLen))
+func readMetadataString(buf *bytes.Buffer, n uint16) (string, error) {
+	if buf.Len() < int(n)+1 {
+		return "", fmt.Errorf("truncated metadata string")
 	}
-	return
+	value := buf.Next(int(n) + 1)
+	if value[len(value)-1] != 0 {
+		return "", fmt.Errorf("metadata string lacks terminator")
+	}
+	return string(value[:len(value)-1]), nil
 }
-
+func metadataEntry(buf *bytes.Buffer, min int) (*bytes.Buffer, error) {
+	if buf.Len() < 4 {
+		return nil, fmt.Errorf("truncated metadata entry length")
+	}
+	n := binary.LittleEndian.Uint32(buf.Bytes())
+	if n < uint32(min) || uint64(n) > uint64(buf.Len()) {
+		return nil, fmt.Errorf("invalid metadata entry length %d", n)
+	}
+	return bytes.NewBuffer(buf.Next(int(n))), nil
+}
+func parseUploadSymbolInfoSymbols(data []byte, datatypes map[string]SymbolUploadDataType) (map[string]*Symbol, error) {
+	symbols := make(map[string]*Symbol)
+	buf := bytes.NewBuffer(data)
+	budget := maxMetadataNodes
+	for buf.Len() > 0 {
+		entryBuf, err := metadataEntry(buf, 33)
+		if err != nil {
+			return nil, err
+		}
+		var entry symbolEntry
+		if err := binary.Read(entryBuf, binary.LittleEndian, &entry); err != nil {
+			return nil, err
+		}
+		name, err := readMetadataString(entryBuf, entry.NameLength)
+		if err != nil {
+			return nil, err
+		}
+		dt, err := readMetadataString(entryBuf, entry.TypeLength)
+		if err != nil {
+			return nil, err
+		}
+		comment, err := readMetadataString(entryBuf, entry.CommentLength)
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(dt, "STRING(") {
+			dt = "STRING"
+		}
+		symbol := &Symbol{FullName: name, Name: name, DataType: dt, Comment: comment, Length: entry.Size, Group: entry.IGroup, Offset: entry.IOffs}
+		budget--
+		if budget < 0 {
+			return nil, fmt.Errorf("symbol expansion exceeds limit")
+		}
+		if definition, ok := datatypes[dt]; ok {
+			children, err := materializeChildren(&definition, symbol, datatypes, 0, &budget)
+			if err != nil {
+				return nil, err
+			}
+			symbol.Children = children
+		}
+		symbols[name] = symbol
+		addChildren(symbol, symbols)
+	}
+	return symbols, nil
+}
 func addChildren(symbol *Symbol, symbols map[string]*Symbol) {
 	for _, child := range symbol.Children {
 		if _, ok := symbols[child.FullName]; !ok {
@@ -161,182 +175,122 @@ func addChildren(symbol *Symbol, symbols map[string]*Symbol) {
 		}
 	}
 }
-
-func addSymbol(symbol symbolUploadSymbol, datatypes map[string]SymbolUploadDataType) *Symbol {
-	sym := &Symbol{}
-	sym.Name = symbol.Name
-	sym.LastUpdateTime = time.Now()
-	sym.MinUpdateInterval = time.Millisecond * 50
-	sym.FullName = symbol.Name
-	sym.DataType = symbol.DataType
-	sym.Comment = symbol.Comment
-	sym.Length = symbol.SymbolEntry.Size
-
-	sym.Group = symbol.SymbolEntry.IGroup
-	sym.Offset = symbol.SymbolEntry.IOffs
-
-	dt, ok := datatypes[symbol.DataType]
-	if ok {
-		sym.Children = dt.addOffset(sym, datatypes, sym.Group, sym.Offset)
+func materializeChildren(data *SymbolUploadDataType, parent *Symbol, types map[string]SymbolUploadDataType, depth int, budget *int) (map[string]*Symbol, error) {
+	if len(data.Children) == 0 {
+		return nil, nil
 	}
-
-	return sym
-}
-
-func (data *SymbolUploadDataType) addOffset(parent *Symbol, datatypes map[string]SymbolUploadDataType, group uint32, offset uint32) (childs map[string]*Symbol) {
-	childs = map[string]*Symbol{}
-
-	var path string
-
+	if depth >= 64 {
+		return nil, fmt.Errorf("cyclic or excessively nested datatype %s", data.Name)
+	}
+	children := make(map[string]*Symbol, len(data.Children))
 	for key, segment := range data.Children {
-
-		if !strings.HasPrefix(segment.Name, "[") {
-			path = fmt.Sprint(parent.FullName, ".", segment.Name)
-		} else {
-			path = fmt.Sprint(parent.FullName, segment.Name)
+		*budget--
+		if *budget < 0 {
+			return nil, fmt.Errorf("symbol expansion exceeds limit")
 		}
-
-		child := Symbol{}
-		child.Name = segment.Name
-		child.LastUpdateTime = time.Now()
-		child.MinUpdateInterval = time.Millisecond * 50
-		child.FullName = path
-		child.DataType = segment.DataType
-		child.Comment = segment.Comment
-		child.Length = segment.DatatypeEntry.Size
-		// Uppdate with area and offset
-		child.Group = group
-		child.Offset = segment.DatatypeEntry.Offs
-
-		child.Parent = parent
-
-		// Check if subitems exist
-		dt, ok := datatypes[segment.DataType]
-		if ok {
-			//log.Warn("Found sub ",segment.DataType);
-			child.Children = dt.addOffset(&child, datatypes, child.Group, child.Offset)
-
-		}
-
-		childs[key] = &child
-	}
-
-	return
-}
-
-func parseUploadSymbolInfoDataTypes(data []byte) (datatypes map[string]SymbolUploadDataType, err error) {
-	buf := bytes.NewBuffer(data)
-	datatypes = make(map[string]SymbolUploadDataType)
-	for buf.Len() > 0 {
-		header, _ := decodeSymbolUploadDataType(buf, "")
-		datatypes[header.Name] = header
-	}
-	return
-}
-
-func decodeSymbolUploadDataType(data *bytes.Buffer, parent string) (header SymbolUploadDataType, err error) {
-
-	dtEntry := datatypeEntry{}
-	header = SymbolUploadDataType{}
-
-	totalSize := data.Len()
-
-	if totalSize < 48 {
-		return header, fmt.Errorf("%s - Wrong size < 48 bytes", parent)
-	}
-
-	err = binary.Read(data, binary.LittleEndian, &dtEntry)
-	if err != nil {
-		return header, fmt.Errorf("failed to read datatype entry: %w", err)
-	}
-
-	name := make([]byte, dtEntry.NameLength)
-	dt := make([]byte, dtEntry.TypeLength)
-	comment := make([]byte, dtEntry.CommentLength)
-
-	err = binary.Read(data, binary.LittleEndian, name)
-	if err != nil {
-		return header, fmt.Errorf("failed to read datatype name: %w", err)
-	}
-	data.Next(1)
-
-	err = binary.Read(data, binary.LittleEndian, dt)
-	if err != nil {
-		return header, fmt.Errorf("failed to read datatype type: %w", err)
-	}
-	data.Next(1)
-
-	err = binary.Read(data, binary.LittleEndian, comment)
-	if err != nil {
-		return header, fmt.Errorf("failed to read datatype comment: %w", err)
-	}
-	data.Next(1)
-
-	header.Name = string(name)
-	header.DataType = string(dt)
-	header.Comment = string(comment)
-
-	header.DatatypeEntry = dtEntry
-
-	if len(header.DataType) > 6 {
-		if header.DataType[:6] == "STRING" {
-			header.DataType = "STRING"
-		}
-	}
-
-	childLen := int(dtEntry.EntryLength) - (totalSize - data.Len())
-	if childLen <= 0 {
-		return
-	}
-
-	childs := make([]byte, childLen)
-	n, err := data.Read(childs)
-	if err != nil {
-		slog.Error("error reading childs", "read_bytes", n, "expected_bytes", childLen, "error", err)
-	}
-
-	if len(childs) == 0 {
-		return
-	}
-
-	buf := bytes.NewBuffer(childs)
-	if header.Children == nil {
-		header.Children = map[string]*SymbolUploadDataType{}
-	}
-	if header.DatatypeEntry.ArrayDim > 0 {
-		// Children is an array
-		var arrayInfo datatypeArrayInfo
-		arrayLevels := []datatypeArrayInfo{}
-
-		for i := 0; i < int(header.DatatypeEntry.ArrayDim); i++ {
-			err = binary.Read(buf, binary.LittleEndian, &arrayInfo)
-			if err != nil {
-				slog.Error("error reading array", "error", err)
+		path := parent.FullName + "." + segment.Name
+		if strings.HasPrefix(segment.Name, "[") {
+			path = parent.FullName + segment.Name
+			if parent.arrayContinuation {
+				path = strings.TrimSuffix(parent.FullName, "]") + "," + segment.Name[1:]
 			}
-			arrayLevels = append(arrayLevels, arrayInfo)
 		}
-		header.Children = makeArrayChildren(arrayLevels, header.DataType, header.DatatypeEntry.Size)
-	} else {
-		// Children is standard variables
-		for j := 0; j < (int)(dtEntry.SubItems); j++ {
-			child, err := decodeSymbolUploadDataType(buf, header.Name)
-			if err != nil {
-				slog.Error("error reading array", "error", err)
+		child := &Symbol{FullName: path, Name: segment.Name, DataType: segment.DataType, Comment: segment.Comment, Length: segment.DatatypeEntry.Size, Group: parent.Group, Offset: segment.DatatypeEntry.Offs, Parent: parent, arrayContinuation: segment.arrayContinuation}
+		if uint64(child.Offset)+uint64(child.Length) > uint64(parent.Length) {
+			return nil, fmt.Errorf("child %s outside parent layout", path)
+		}
+		definition := segment
+		if len(segment.Children) == 0 {
+			if dt, ok := types[segment.DataType]; ok {
+				definition = &dt
+			}
+		}
+		nested, err := materializeChildren(definition, child, types, depth+1, budget)
+		if err != nil {
+			return nil, err
+		}
+		child.Children = nested
+		children[key] = child
+	}
+	return children, nil
+}
+func parseUploadSymbolInfoDataTypes(data []byte) (map[string]SymbolUploadDataType, error) {
+	buf := bytes.NewBuffer(data)
+	types := make(map[string]SymbolUploadDataType)
+	budget := maxMetadataNodes
+	for buf.Len() > 0 {
+		entry, err := decodeDatatype(buf, 0, &budget)
+		if err != nil {
+			return nil, err
+		}
+		types[entry.Name] = entry
+	}
+	return types, nil
+}
+func decodeSymbolUploadDataType(buf *bytes.Buffer, parent string) (SymbolUploadDataType, error) {
+	budget := maxMetadataNodes
+	return decodeDatatype(buf, 0, &budget)
+}
+func decodeDatatype(data *bytes.Buffer, depth int, budget *int) (header SymbolUploadDataType, err error) {
+	if depth >= 64 {
+		return header, fmt.Errorf("datatype nesting exceeds limit")
+	}
+	*budget--
+	if *budget < 0 {
+		return header, fmt.Errorf("datatype count exceeds limit")
+	}
+	buf, err := metadataEntry(data, 45)
+	if err != nil {
+		return header, err
+	}
+	if err = binary.Read(buf, binary.LittleEndian, &header.DatatypeEntry); err != nil {
+		return header, err
+	}
+	entry := header.DatatypeEntry
+	if header.Name, err = readMetadataString(buf, entry.NameLength); err != nil {
+		return header, err
+	}
+	if header.DataType, err = readMetadataString(buf, entry.TypeLength); err != nil {
+		return header, err
+	}
+	if header.Comment, err = readMetadataString(buf, entry.CommentLength); err != nil {
+		return header, err
+	}
+	if strings.HasPrefix(header.DataType, "STRING(") {
+		header.DataType = "STRING"
+	}
+	if entry.ArrayDim > 64 {
+		return header, fmt.Errorf("array dimension exceeds limit")
+	}
+	if entry.ArrayDim > 0 {
+		levels := make([]datatypeArrayInfo, entry.ArrayDim)
+		if err = binary.Read(buf, binary.LittleEndian, levels); err != nil {
+			return header, err
+		}
+		header.Children, err = arrayChildren(levels, header.DataType, entry.Size, budget)
+		if err != nil {
+			return header, err
+		}
+	} else if entry.SubItems > 0 {
+		header.Children = make(map[string]*SymbolUploadDataType)
+		for i := 0; i < int(entry.SubItems); i++ {
+			child, e := decodeDatatype(buf, depth+1, budget)
+			if e != nil {
+				return header, e
+			}
+			if _, exists := header.Children[child.Name]; exists {
+				return header, fmt.Errorf("duplicate datatype field %s", child.Name)
 			}
 			header.Children[child.Name] = &child
 		}
 	}
-
-	if hasDatatypeFlag(dtEntry.Flags, datatypeFlagEnumInfos) {
-		enumMembers, err := parseEnumMembersFromDatatypeTail(buf, dtEntry.Flags, int(dtEntry.Size), header.DataType)
+	if hasDatatypeFlag(entry.Flags, datatypeFlagEnumInfos) {
+		header.EnumMembers, err = parseEnumMembersFromDatatypeTail(buf, entry.Flags, int(entry.Size), header.DataType)
 		if err != nil {
-			slog.Debug("failed parsing enum members", "type", header.Name, "error", err)
-		} else {
-			header.EnumMembers = enumMembers
+			return header, err
 		}
 	}
-
-	return
+	return header, nil
 }
 
 func hasDatatypeFlag(flags uint32, flag uint32) bool {
@@ -405,7 +359,9 @@ func parseEnumMembersFromDatatypeTail(buf *bytes.Buffer, flags uint32, valueSize
 	}
 
 	if hasDatatypeFlag(flags, datatypeFlagExtendedEnumInfos) {
-		_ = skipExtendedEnumInfos(buf, len(members))
+		if err := skipExtendedEnumInfos(buf, len(members)); err != nil {
+			return nil, err
+		}
 	}
 	return members, nil
 }
@@ -513,35 +469,35 @@ func decodeEnumValue(baseType string, data []byte) (int64, error) {
 	}
 }
 
-func makeArrayChildren(levels []datatypeArrayInfo, dt string, size uint32) (childs map[string]*SymbolUploadDataType) {
-	childs = map[string]*SymbolUploadDataType{}
-
-	if len(levels) < 1 {
-		return
+func makeArrayChildren(levels []datatypeArrayInfo, dt string, size uint32) map[string]*SymbolUploadDataType {
+	budget := maxMetadataNodes
+	children, _ := arrayChildren(levels, dt, size, &budget)
+	return children
+}
+func arrayChildren(levels []datatypeArrayInfo, dt string, size uint32, budget *int) (map[string]*SymbolUploadDataType, error) {
+	if len(levels) == 0 {
+		return nil, nil
 	}
-
-	level := levels[:1][0]
-	subChildren := makeArrayChildren(levels[1:], dt, size)
-
-	var offset uint32
-
-	for i := level.LBound; i < level.LBound+level.Elements; i++ {
-		name := fmt.Sprint("[", i, "]")
-
-		child := SymbolUploadDataType{}
-		child.Name = name
-		child.DataType = dt
-		child.DatatypeEntry.Offs = offset
-		child.DatatypeEntry.Size = size / level.Elements
-		child.Children = subChildren
-
-		//child.Walk("")
-
-		childs[name] = &child
-		offset += size / level.Elements
+	level := levels[0]
+	if level.Elements == 0 || size%level.Elements != 0 || level.Elements > uint32(*budget) {
+		return nil, fmt.Errorf("invalid or excessive array dimensions")
 	}
-
-	return
+	*budget -= int(level.Elements)
+	elementSize := size / level.Elements
+	nested, err := arrayChildren(levels[1:], dt, elementSize, budget)
+	if err != nil {
+		return nil, err
+	}
+	children := make(map[string]*SymbolUploadDataType, int(level.Elements))
+	for i := uint32(0); i < level.Elements; i++ {
+		index := int64(level.LBound) + int64(i)
+		if index > 2147483647 {
+			return nil, fmt.Errorf("array bound overflows int32")
+		}
+		name := fmt.Sprintf("[%d]", index)
+		children[name] = &SymbolUploadDataType{Name: name, DataType: dt, DatatypeEntry: datatypeEntry{Offs: i * elementSize, Size: elementSize}, Children: nested, arrayContinuation: len(levels) > 1}
+	}
+	return children, nil
 }
 
 // isArraySymbol checks if a symbol represents an array
@@ -551,19 +507,12 @@ func isArraySymbol(symbol *Symbol) bool {
 		return false
 	}
 	for name := range symbol.Children {
-		return len(name) > 2 && name[0] == '[' && name[len(name)-1] == ']'
+		if len(name) < 3 || name[0] != '[' || name[len(name)-1] != ']' {
+			return false
+		}
 	}
-	return false
+	return true
 }
 
 // getFieldsByOffset returns symbol children sorted by offset
-func getFieldsByOffset(symbol *Symbol) []*Symbol {
-	fields := make([]*Symbol, 0, len(symbol.Children))
-	for _, child := range symbol.Children {
-		fields = append(fields, child)
-	}
-	sort.Slice(fields, func(i, j int) bool {
-		return fields[i].Offset < fields[j].Offset
-	})
-	return fields
-}
+func getFieldsByOffset(symbol *Symbol) []*Symbol { return cacheFor(symbol).ordered }

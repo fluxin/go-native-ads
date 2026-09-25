@@ -37,12 +37,9 @@ func (conn *Connection) AddDeviceNotification(
 	maxDelay time.Duration,
 	cycleTime time.Duration,
 ) (handle uint32, err error) {
-	if err := conn.ensureConnected(); err != nil {
-		return 0, err
-	}
-
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
+	return conn.addDeviceNotification(group, offset, length, transmissionMode, maxDelay, cycleTime, false)
+}
+func (conn *Connection) addDeviceNotification(group, offset, length uint32, transmissionMode TransMode, maxDelay, cycleTime time.Duration, internal bool) (handle uint32, err error) {
 	request := new(bytes.Buffer)
 	type addDeviceNotificationCommandPacket struct {
 		Group            uint32
@@ -87,7 +84,7 @@ func (conn *Connection) AddDeviceNotification(
 		return 0, fmt.Errorf("failed to encode AddDeviceNotification request: %w", err)
 	}
 	// Try to send the request
-	resp, err := conn.sendRequest(CommandIDAddDeviceNotification, request.Bytes())
+	resp, err := conn.request(CommandIDAddDeviceNotification, request.Bytes(), internal)
 	if err != nil {
 		return
 	}

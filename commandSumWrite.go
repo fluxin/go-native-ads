@@ -27,7 +27,7 @@ func parseSumWriteResponse(commands []sumWriteSubCommand, resp []byte) ([]sumWri
 }
 
 // sumWriteSubCommand represents a single write operation in a sum command
-type sumWriteSubCommand struct {
+type SumWriteCommand struct {
 	Group  uint32
 	Offset uint32
 	Length uint32
@@ -35,26 +35,36 @@ type sumWriteSubCommand struct {
 }
 
 // sumWriteSubResult represents the result of a single write operation
-type sumWriteSubResult struct {
+type SumWriteResult struct {
 	Error ReturnCode
 }
 
-func (conn *Connection) SumWrite(commands []sumWriteSubCommand) ([]sumWriteSubResult, error) {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
+func (conn *Connection) SumWrite(commands []SumWriteCommand) ([]SumWriteResult, error) {
+	return conn.sumWrite(commands, false)
+}
+func (conn *Connection) sumWrite(commands []sumWriteSubCommand, internal bool) ([]sumWriteSubResult, error) {
 
 	const maxCommands = 500
+	if len(commands) == 0 {
+		return nil, fmt.Errorf("empty sum request")
+	}
 	if len(commands) > maxCommands {
 		return nil, fmt.Errorf("batch size %d exceeds maximum %d", len(commands), maxCommands)
 	}
 
 	// Calculate total data length
-	totalDataLength := uint32(0)
+	totalDataLength := uint64(0)
 	for _, cmd := range commands {
-		totalDataLength += uint32(len(cmd.Data))
+		totalDataLength += uint64(len(cmd.Data))
+		if cmd.Length != uint32(len(cmd.Data)) {
+			return nil, fmt.Errorf("sum write length mismatch")
+		}
 	}
 
-	request := bytes.NewBuffer([]byte{})
+	if totalDataLength+uint64(len(commands)*12)+48 > uint64(conn.frameLimit()) {
+		return nil, fmt.Errorf("sum request exceeds frame limit")
+	}
+	request := bytes.NewBuffer(make([]byte, 0, 16+12*len(commands)+int(totalDataLength)))
 	type sumWriteHeader struct {
 		IndexGroup  uint32
 		IndexOffset uint32
@@ -67,7 +77,7 @@ func (conn *Connection) SumWrite(commands []sumWriteSubCommand) ([]sumWriteSubRe
 		IndexGroup:  uint32(GroupSumupWrite),
 		IndexOffset: uint32(len(commands)),
 		ReadLength:  uint32(len(commands) * 4), // Just error codes
-		WriteLength: uint32(len(commands)*12) + totalDataLength,
+		WriteLength: uint32(len(commands)*12) + uint32(totalDataLength),
 	}
 
 	err := binary.Write(request, binary.LittleEndian, header)
@@ -106,7 +116,7 @@ func (conn *Connection) SumWrite(commands []sumWriteSubCommand) ([]sumWriteSubRe
 	}
 
 	// Send the request (SumWrite is actually a ReadWrite command)
-	resp, err := conn.sendRequest(CommandIDReadWrite, request.Bytes())
+	resp, err := conn.request(CommandIDReadWrite, request.Bytes(), internal)
 	if err != nil {
 		slog.Error("sum write request failed", "error", err)
 		return nil, fmt.Errorf("sum write request failed: %w", err)
@@ -128,3 +138,7 @@ func (conn *Connection) SumWrite(commands []sumWriteSubCommand) ([]sumWriteSubRe
 	}
 	return results, nil
 }
+
+type sumWriteSubCommand = SumWriteCommand
+
+type sumWriteSubResult = SumWriteResult

@@ -59,8 +59,8 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 - `GroupSymbolVersion` is monitored; version changes trigger metadata reload, handle invalidation, and subscription restoration.
 - AMS/TCP router note frames are parsed and exposed through route diagnostics helpers.
 - `SumRead`/`SumWrite` are sent through `ReadWrite` with `GroupSumupRead (0xF080)` and `GroupSumupWrite (0xF081)`.
-- Primitive and `time.Time` handles are validated at acquisition; struct/array shape validation occurs during encode/decode.
-- Array encode/decode delegates per-element dispatch through `encodeField`/`decodeField`, supporting primitives, structs, and nested arrays as element types.
+- A shared cached codec validates primitive/time types, struct fields, array shapes, offsets and byte widths at acquisition and rebinding.
+- Array encode/decode uses compiled ordered layouts, including negative lower bounds and multidimensional arrays.
 - Type mismatch errors in encode/decode include symbol name, Go type, and ADS type.
 - Notifications encode `CycleTime` and `MaxDelay` as 100ns ADS ticks.
 - Max sum command count is fixed at 500.
@@ -75,7 +75,7 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 
 ## Open work
 
-- Immediate focus: hardening reconnect/restore behavior with deterministic transport-failure tests.
+- Immediate focus: rerun live PLC smoke and exercise reconnect/online schema changes on a real target; offline socket and race regression gates cover the hardened implementation.
 - Deferred extras: RPC invocation support.
 
 ## Core style and implementation patterns

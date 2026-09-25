@@ -27,37 +27,49 @@ type Connection struct {
 	unixSocket string
 
 	// AMS addressing
-	target AmsAddress
-	source AmsAddress
+	target      AmsAddress
+	source      AmsAddress
+	addressLock sync.RWMutex
 
 	// Communication channels
-	sendChannel    chan []byte
-	systemResponse chan []byte
+	sendChannel    chan outgoingPacket
+	systemResponse chan routerResponse
+	systemLock     sync.Mutex
+	timeout        time.Duration
+	maxFrameSize   uint32
 
 	// Request handling - invokeid → response channel
 	currentRequest    uint32
 	activeRequestLock sync.Mutex
-	activeRequests    map[uint32]chan []byte
+	activeRequests    map[uint32]*pendingRequest
 
 	// Symbol and notification state
-	symbols              map[string]*Symbol
-	activeNotifications  map[uint32]NotificationCallback
-	pendingNotifications map[uint32][]pendingNotification
-	subscriptions        map[uint64]*subscriptionSpec
-	notificationToSubID  map[uint32]uint64
-	nextSubID            uint64
-	symbolLock           sync.Mutex
+	symbols                map[string]*Symbol
+	activeNotifications    map[uint32]NotificationCallback
+	pendingNotifications   map[uint32][]pendingNotification
+	subscriptions          map[uint64]*subscriptionSpec
+	notificationToSubID    map[uint32]uint64
+	nextSubID              uint64
+	symbolLock             sync.Mutex
+	acquisitions           map[string]*handleAcquisition
+	restoreLock            sync.Mutex
+	generationLock         sync.RWMutex
+	backgroundGroup        sync.WaitGroup
+	closeOnce              sync.Once
+	unknownCleanup         map[uint32]bool
+	pendingBytes           int
+	notificationGeneration uint64
 
 	// Type information
 	datatypes map[string]SymbolUploadDataType
 
 	// Lifecycle management
-	ctx       context.Context
-	shutdown  context.CancelFunc
-	waitGroup sync.WaitGroup
+	ctx      context.Context
+	shutdown context.CancelFunc
 
 	transportLock   sync.Mutex
 	transportCancel context.CancelFunc
+	transportCtx    context.Context
 	transportGroup  sync.WaitGroup
 
 	connectLock      sync.Mutex
@@ -72,6 +84,7 @@ type Connection struct {
 	symbolVersionKnown       bool
 	symbolVersionWatchHandle uint32
 	symbolVersionRefreshing  atomic.Bool
+	versionDirty             bool
 
 	routerStateLock      sync.Mutex
 	routerState          RouterState
@@ -126,6 +139,10 @@ type ConnectionOptions struct {
 	// UnixSocketPath is used when Transport is unix, or auto selects unix.
 	// Defaults to /run/ams/tcsyssrv.ams.sock.
 	UnixSocketPath string
+	// RequestTimeout bounds ADS requests and router negotiation; default 4s.
+	RequestTimeout time.Duration
+	// MaxFrameSize bounds incoming and outgoing AMS payloads; default 16 MiB.
+	MaxFrameSize uint32
 }
 
 // NewConnection creates a new ADS connection.
@@ -148,7 +165,16 @@ func NewConnection(ctx context.Context, opts ConnectionOptions) (conn *Connectio
 		return nil, fmt.Errorf("invalid connection transport: %q", opts.Transport)
 	}
 
-	conn = &Connection{ip: opts.IP, port: opts.Port, transport: opts.Transport, unixSocket: opts.UnixSocketPath}
+	if opts.RequestTimeout < 0 {
+		return nil, fmt.Errorf("negative request timeout")
+	}
+	if opts.MaxFrameSize != 0 && opts.MaxFrameSize < 32 {
+		return nil, fmt.Errorf("frame limit must be at least 32 bytes")
+	}
+	if opts.AMSPort < 0 || opts.AMSPort > 65535 || opts.SourcePort < 0 || opts.SourcePort > 65535 {
+		return nil, fmt.Errorf("AMS port out of range")
+	}
+	conn = &Connection{timeout: opts.RequestTimeout, maxFrameSize: opts.MaxFrameSize, ip: opts.IP, port: opts.Port, transport: opts.Transport, unixSocket: opts.UnixSocketPath}
 	conn.local = opts.NetID == localhostNetID
 	conn.target.NetID, err = stringToNetID(opts.NetID)
 	if err != nil {
@@ -162,13 +188,14 @@ func NewConnection(ctx context.Context, opts ConnectionOptions) (conn *Connectio
 		}
 	}
 	conn.source.Port = uint16(opts.SourcePort)
-	conn.systemResponse = make(chan []byte)
-	conn.activeRequests = map[uint32]chan []byte{}
+	conn.systemResponse = make(chan routerResponse, 1)
+	conn.activeRequests = map[uint32]*pendingRequest{}
 	conn.activeNotifications = make(map[uint32]NotificationCallback)
+	conn.unknownCleanup = make(map[uint32]bool)
 	conn.pendingNotifications = make(map[uint32][]pendingNotification)
 	conn.subscriptions = make(map[uint64]*subscriptionSpec)
 	conn.notificationToSubID = make(map[uint32]uint64)
-	conn.sendChannel = make(chan []byte)
+	conn.sendChannel = make(chan outgoingPacket)
 	conn.reconnectSignal = make(chan struct{}, 1)
 	conn.reconnectPolicy = normalizeReconnectPolicy(opts.ReconnectPolicy)
 	conn.state = connectionStateDisconnected
@@ -179,31 +206,37 @@ func NewConnection(ctx context.Context, opts ConnectionOptions) (conn *Connectio
 func (conn *Connection) Connect() error {
 	conn.connectLock.Lock()
 	defer conn.connectLock.Unlock()
-
+	conn.generationLock.Lock()
+	defer conn.generationLock.Unlock()
 	conn.stateLock.Lock()
+	if conn.state == connectionStateClosed || conn.ctx.Err() != nil {
+		conn.stateLock.Unlock()
+		return net.ErrClosed
+	}
+	if conn.state == connectionStateConnected {
+		conn.stateLock.Unlock()
+		return nil
+	}
 	conn.state = connectionStateConnecting
 	conn.stateLock.Unlock()
 	if err := conn.connectWithMetadata(); err != nil {
-		conn.stateLock.Lock()
-		conn.state = connectionStateDisconnected
-		conn.stateLock.Unlock()
+		conn.setState(connectionStateDisconnected)
 		return err
 	}
-	conn.stateLock.Lock()
-	conn.state = connectionStateConnected
-	conn.stateLock.Unlock()
+	conn.refreshAfterReconnect()
 	conn.epoch.Add(1)
-	conn.ensureSymbolVersionWatcher()
-	return nil
+	return conn.publishConnected()
 }
 
 func (conn *Connection) connectWithMetadata() error {
 	slog.Debug("Dialing", "ip", conn.ip, "port", conn.port)
 	if conn.local {
+		conn.addressLock.Lock()
 		conn.target.NetID = [6]byte{127, 0, 0, 1, 1, 1}
+		conn.addressLock.Unlock()
 	}
 	network, address := conn.dialTarget()
-	dialer := net.Dialer{}
+	dialer := net.Dialer{Timeout: conn.requestTimeout()}
 	connection, err := dialer.DialContext(conn.ctx, network, address)
 	if err != nil {
 		return fmt.Errorf("dial %s %s: %w", network, address, err)
@@ -221,7 +254,7 @@ func (conn *Connection) connectWithMetadata() error {
 
 	// Negotiate AMS address with the router (only when connecting via the AMS router port).
 	if conn.local || conn.port == 48898 {
-		resp, err := conn.send(buildRouterPortConnectPacket(0))
+		resp, err := conn.sendSystem(buildRouterPortConnectPacket(0), true)
 		if err != nil {
 			return fmt.Errorf("AMS router address negotiation failed: %w", err)
 		}
@@ -230,7 +263,9 @@ func (conn *Connection) connectWithMetadata() error {
 			return fmt.Errorf("failed to parse router-assigned AMS address: %w", err)
 		}
 		slog.Info("Router assigned source", "source", assignedSource)
+		conn.addressLock.Lock()
 		conn.source = assignedSource
+		conn.addressLock.Unlock()
 	}
 
 	datatypes, symbols, err := conn.fetchMetadata()
@@ -251,6 +286,9 @@ func (conn *Connection) activateTransport(connection net.Conn) context.Context {
 	conn.transportLock.Lock()
 	conn.connection = connection
 	conn.transportCancel = cancel
+	conn.transportCtx = ctx
+	conn.sendChannel = make(chan outgoingPacket)
+	conn.systemResponse = make(chan routerResponse, 1)
 	conn.transportLock.Unlock()
 	return ctx
 }
@@ -272,6 +310,7 @@ func (conn *Connection) stopTransport() {
 	cancel := conn.transportCancel
 	connection := conn.connection
 	conn.transportCancel = nil
+	conn.transportCtx = nil
 	conn.connection = nil
 	conn.transportLock.Unlock()
 
@@ -299,30 +338,98 @@ func (conn *Connection) shouldAutoDialUnix() bool {
 	return err == nil && info.Mode()&os.ModeSocket != 0
 }
 
-// Close closes connection and waits for completion
+// Close cancels outstanding work, closes the transport, and joins owned workers.
+// Remote releases are best effort and share a 100ms budget.
 func (conn *Connection) Close() {
-	slog.Debug("closing ADS connection")
-	slog.Debug("sending shutdown to workers")
-	for handle := range conn.activeNotifications {
-		conn.DeleteDeviceNotification(handle)
-		slog.Debug("removed notification handle", "handle", handle)
+	conn.closeOnce.Do(func() {
+		conn.stateLock.Lock()
+		conn.state = connectionStateClosed
+		conn.shutdown()
+		conn.stateLock.Unlock()
+		conn.connectLock.Lock()
+		conn.generationLock.Lock()
+		conn.closeTransport()
+		conn.symbolLock.Lock()
+		for _, spec := range conn.subscriptions {
+			if spec.delivery != nil {
+				spec.delivery.cancel()
+			}
+		}
+		conn.symbolLock.Unlock()
+		conn.generationLock.Unlock()
+		conn.connectLock.Unlock()
+		conn.backgroundGroup.Wait()
+	})
+}
+
+// Called only after shutdown and with connectLock and generationLock held.
+func (conn *Connection) closeTransport() {
+	conn.transportLock.Lock()
+	connection, cancel := conn.connection, conn.transportCancel
+	conn.connection = nil
+	conn.transportCancel = nil
+	conn.transportCtx = nil
+	conn.transportLock.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if connection == nil {
+		conn.transportGroup.Wait()
+		return
+	}
+	// Interrupt reads/writes before joining; a user callback cannot hold these workers.
+	_ = connection.SetDeadline(time.Now())
+	conn.transportGroup.Wait()
+	defer connection.Close()
+	deadline := time.Now().Add(100 * time.Millisecond)
+	_ = connection.SetWriteDeadline(deadline)
+	send := func(packet []byte) bool {
+		for len(packet) > 0 {
+			if time.Now().After(deadline) {
+				return false
+			}
+			n, err := connection.Write(packet)
+			if err != nil || n == 0 {
+				return false
+			}
+			packet = packet[n:]
+		}
+		return true
 	}
 	conn.symbolLock.Lock()
+	notifications := make([]uint32, 0, len(conn.activeNotifications))
+	for handle := range conn.activeNotifications {
+		notifications = append(notifications, handle)
+	}
+	handles := make([]uint32, 0)
 	for _, symbol := range conn.symbols {
 		if symbol.Handle != 0 {
-			slog.Debug("releasing symbol handle", "handle", symbol.Handle)
-			handleBytes := make([]byte, 4)
-			binary.LittleEndian.PutUint32(handleBytes, symbol.Handle)
-			conn.Write(uint32(GroupSymbolReleaseHandle), 0, handleBytes)
+			handles = append(handles, symbol.Handle)
 		}
 	}
 	conn.symbolLock.Unlock()
-	conn.stateLock.Lock()
-	conn.state = connectionStateClosed
-	conn.stateLock.Unlock()
-	conn.shutdown()
-	conn.stopTransport()
-	slog.Debug("waiting for workers to close")
-	conn.waitGroup.Wait()
-	slog.Debug("ADS connection closed")
+	for _, handle := range notifications {
+		data := make([]byte, 4)
+		binary.LittleEndian.PutUint32(data, handle)
+		packet, _ := conn.encode(CommandIDDeleteDeviceNotification, data, 0)
+		if !send(packet) {
+			return
+		}
+	}
+	for _, handle := range handles {
+		data := make([]byte, 16)
+		binary.LittleEndian.PutUint32(data, uint32(GroupSymbolReleaseHandle))
+		binary.LittleEndian.PutUint32(data[8:], 4)
+		binary.LittleEndian.PutUint32(data[12:], handle)
+		packet, _ := conn.encode(CommandIDWrite, data, 0)
+		if !send(packet) {
+			return
+		}
+	}
+	conn.addressLock.RLock()
+	port := conn.source.Port
+	conn.addressLock.RUnlock()
+	if port != 0 {
+		send(buildRouterPortClosePacket(port))
+	}
 }

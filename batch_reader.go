@@ -2,12 +2,10 @@ package ads
 
 import (
 	"fmt"
-	"log/slog"
 	"reflect"
+	"sync"
 )
 
-// handleInfo holds the metadata needed for batch operations.
-// This is a non-generic internal type used by batch readers/writers.
 type handleInfo struct {
 	conn       *Connection
 	handle     uint32
@@ -15,77 +13,15 @@ type handleInfo struct {
 	dataType   string
 	symbolName string
 	bindEpoch  uint64
+	symbol     *Symbol
+	typ        reflect.Type
+	codec      *codecNode
 }
-
-// BatchReader provides reusable batch reading of struct fields from PLC.
-// Handles are passed as pointers and map to struct fields in declaration order.
-type BatchReader[T any] struct {
-	conn     *Connection
-	handles  []handleInfo        // Cached handle metadata
-	commands []sumReadSubCommand // Pre-built ADS commands
-	fields   []fieldInfo         // Cached struct field info
-}
-
-// fieldInfo holds information about a struct field for batch operations.
 type fieldInfo struct {
 	name  string
-	index []int // Full index path for nested fields
+	index []int
+	typ   reflect.Type
 }
-
-// NewBatchReader creates a batch reader that maps struct fields to PLC handles.
-// Handles are passed as pointers and must match struct field declaration order.
-func NewBatchReader[T any](conn *Connection, handles ...any) (*BatchReader[T], error) {
-	var zero T
-	structType := reflect.TypeOf(zero)
-
-	// Validate T is a struct
-	if structType.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("type parameter must be a struct, got %s", structType.Kind())
-	}
-
-	// Extract handle info from typed handles
-	handleInfos := make([]handleInfo, len(handles))
-	for i, h := range handles {
-		info, err := extractHandleInfo(h)
-		if err != nil {
-			return nil, fmt.Errorf("handle %d: %w", i, err)
-		}
-		handleInfos[i] = info
-		slog.Debug("batch reader mapped handle", "index", i, "symbol", info.symbolName, "group", GroupSymbolValueByHandle, "offset", info.handle, "length", info.length)
-	}
-
-	// Count total leaf fields
-	flatFieldCount := countLeafFields(structType)
-
-	// Validate handle count matches field count
-	if len(handles) != flatFieldCount {
-		return nil, fmt.Errorf("handle count mismatch: got %d handles, struct has %d fields",
-			len(handles), flatFieldCount)
-	}
-
-	// Build pre-constructed commands
-	commands := make([]sumReadSubCommand, len(handleInfos))
-	for i, info := range handleInfos {
-		commands[i] = sumReadSubCommand{
-			Group:  uint32(GroupSymbolValueByHandle),
-			Offset: info.handle,
-			Length: info.length,
-		}
-	}
-
-	// Cache struct field info for decoding
-	fields := getAllFieldInfo(structType)
-
-	return &BatchReader[T]{
-		conn:     conn,
-		handles:  handleInfos,
-		commands: commands,
-		fields:   fields,
-	}, nil
-}
-
-// HandleInfoGetter interface for extracting handle metadata.
-// This is implemented by all Handle[T] types.
 type HandleInfoGetter interface {
 	HandleValue() uint32
 	Length() uint32
@@ -94,165 +30,164 @@ type HandleInfoGetter interface {
 	Connection() *Connection
 }
 
-// extractHandleInfo extracts metadata from a typed Handle using type assertion.
-// Uses the HandleInfoGetter interface to avoid reflection on unexported fields.
 func extractHandleInfo(h any) (handleInfo, error) {
-	// Use type assertion to get the HandleInfoGetter interface
 	getter, ok := h.(HandleInfoGetter)
-	if !ok {
-		return handleInfo{}, fmt.Errorf("handle must be a *Handle[T] type, got %T", h)
+	if !ok || (reflect.ValueOf(h).Kind() == reflect.Pointer && reflect.ValueOf(h).IsNil()) {
+		return handleInfo{}, fmt.Errorf("expected nonnil typed handle")
 	}
-
-	return handleInfo{
-		conn:       getter.Connection(),
-		handle:     getter.HandleValue(),
-		length:     getter.Length(),
-		dataType:   getter.ADSType(),
-		symbolName: getter.SymbolName(),
-		bindEpoch:  getter.Connection().CurrentEpoch(),
-	}, nil
+	if getter.Connection() == nil {
+		return handleInfo{}, fmt.Errorf("handle has no connection")
+	}
+	// Copy identity only. A numeric handle is meaningful only with its actual binding epoch.
+	return handleInfo{conn: getter.Connection(), symbolName: getter.SymbolName()}, nil
 }
-
 func ensureHandleInfoBound(info *handleInfo) error {
 	epoch := info.conn.CurrentEpoch()
-	if info.bindEpoch == epoch && info.handle != 0 {
+	if info.bindEpoch == epoch && info.handle != 0 && (info.typ == nil || info.codec != nil) {
 		return nil
 	}
-	symbol, err := info.conn.GetSymbol(info.symbolName)
+	symbol, err := info.conn.lookupSymbol(info.symbolName, true)
 	if err != nil {
 		return err
+	}
+	var plan *codecNode
+	if info.typ != nil {
+		plan, err = codecFor(info.typ, symbol, info.conn.datatypeSnapshot())
+		if err != nil {
+			return err
+		}
 	}
 	info.handle = symbol.Handle
 	info.length = symbol.Length
 	info.dataType = symbol.DataType
 	info.bindEpoch = epoch
+	info.symbol = symbol
+	info.codec = plan
 	return nil
 }
-
-// Read executes the batch read and populates the target struct.
-// All fields are updated atomically from the same PLC scan cycle.
-func (br *BatchReader[T]) Read(target *T) error {
-	targetValue := reflect.ValueOf(target).Elem()
-
-	// Execute batch read using pre-built commands
-	for i := range br.handles {
-		if err := ensureHandleInfoBound(&br.handles[i]); err != nil {
-			return fmt.Errorf("handle bind failed for %s: %w", br.handles[i].symbolName, err)
-		}
-		br.commands[i] = sumReadSubCommand{
-			Group:  uint32(GroupSymbolValueByHandle),
-			Offset: br.handles[i].handle,
-			Length: br.handles[i].length,
-		}
-	}
-
-	sumResults, err := br.conn.SumRead(br.commands)
-	if err != nil {
-		return fmt.Errorf("batch read failed: %w", err)
-	}
-
-	// Validate result count
-	if len(sumResults) != len(br.handles) {
-		return fmt.Errorf("result count mismatch: got %d results for %d handles",
-			len(sumResults), len(br.handles))
-	}
-
-	// Decode each field
-	errors := make([]BatchFieldError, 0)
-
-	for i, info := range br.handles {
-		field := br.fields[i]
-		fieldValue := targetValue.FieldByIndex(field.index)
-
-		// Check for ADS error
-		if sumResults[i].Error != ReturnCodeNoErrors {
-			errors = append(errors, BatchFieldError{
-				Field:   field.name,
-				Symbol:  info.symbolName,
-				ADSCode: sumResults[i].Error,
-				Message: fmt.Sprintf("ADS error %d", sumResults[i].Error),
-			})
-			continue
-		}
-
-		// Decode value into field
-		tempSymbol := &Symbol{
-			DataType: info.dataType,
-			Length:   info.length,
-		}
-
-		if err := decodePrimitiveField(fieldValue, tempSymbol, sumResults[i].Data, br.conn.datatypes); err != nil {
-			errors = append(errors, BatchFieldError{
-				Field:   field.name,
-				Symbol:  info.symbolName,
-				Message: fmt.Sprintf("decode failed: %v", err),
-			})
-		}
-	}
-
-	if len(errors) > 0 {
-		return &BatchReadError{
-			FieldErrors: errors,
-			TotalFields: len(br.handles),
-		}
-	}
-
-	return nil
-}
-
-// countLeafFields returns the total number of leaf fields in a struct type.
-func countLeafFields(t reflect.Type) int {
-	if t.Kind() != reflect.Struct {
-		return 1
-	}
-
-	count := 0
-	for field := range t.Fields() {
-		if field.Type.Kind() == reflect.Struct && field.Type.NumField() > 0 {
-			count += countLeafFields(field.Type)
-		} else {
-			count++
-		}
-	}
-	return count
-}
-
-// getAllFieldInfo returns field information for all leaf fields.
 func getAllFieldInfo(t reflect.Type) []fieldInfo {
-	fields := make([]fieldInfo, 0)
-	collectFieldInfo(t, []int{}, &fields)
+	var fields []fieldInfo
+	collectFieldInfo(t, nil, &fields)
 	return fields
 }
-
+func countLeafFields(t reflect.Type) int { return len(getAllFieldInfo(t)) }
 func collectFieldInfo(t reflect.Type, prefix []int, fields *[]fieldInfo) {
-	if t.Kind() != reflect.Struct {
-		return
-	}
-
 	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		index := append(append([]int{}, prefix...), i)
-
-		if field.Type.Kind() == reflect.Struct && field.Type.NumField() > 0 {
-			collectFieldInfo(field.Type, index, fields)
+		f := t.Field(i)
+		path := append(append([]int(nil), prefix...), i)
+		if f.Type.Kind() == reflect.Struct && !isTimeType(f.Type) {
+			collectFieldInfo(f.Type, path, fields)
 		} else {
-			*fields = append(*fields, fieldInfo{
-				name:  field.Name,
-				index: index,
-			})
+			*fields = append(*fields, fieldInfo{f.Name, path, f.Type})
 		}
 	}
 }
+func buildBatch(conn *Connection, t reflect.Type, handles []any) ([]handleInfo, []fieldInfo, error) {
+	if t.Kind() != reflect.Struct || isTimeType(t) {
+		return nil, nil, fmt.Errorf("batch type must be a struct")
+	}
+	fields := getAllFieldInfo(t)
+	if len(handles) == 0 || len(handles) > 500 || len(handles) != len(fields) {
+		return nil, nil, fmt.Errorf("batch requires 1..500 handles matching %d fields", len(fields))
+	}
+	infos := make([]handleInfo, len(handles))
+	for i, h := range handles {
+		info, err := extractHandleInfo(h)
+		if err != nil {
+			return nil, nil, err
+		}
+		if info.conn != conn {
+			return nil, nil, fmt.Errorf("handle %d belongs to another connection", i)
+		}
+		f := t
+		for _, index := range fields[i].index {
+			sf := f.Field(index)
+			if sf.PkgPath != "" {
+				return nil, nil, fmt.Errorf("unexported batch field %s", sf.Name)
+			}
+			f = sf.Type
+		}
+		info.typ = fields[i].typ
+		if err := ensureHandleInfoBound(&info); err != nil {
+			return nil, nil, fmt.Errorf("field %s: %w", fields[i].name, err)
+		}
+		infos[i] = info
+	}
+	return infos, fields, nil
+}
 
-// BatchFieldError represents an error for a specific field in a batch operation.
+// BatchReader reads fields in one ADS sum request. Concurrent calls are serialized.
+type BatchReader[T any] struct {
+	conn     *Connection
+	mu       sync.Mutex
+	handles  []handleInfo
+	commands []sumReadSubCommand
+	fields   []fieldInfo
+}
+
+func NewBatchReader[T any](conn *Connection, handles ...any) (*BatchReader[T], error) {
+	if conn == nil {
+		return nil, fmt.Errorf("nil connection")
+	}
+	if err := conn.beginOperation(); err != nil {
+		return nil, err
+	}
+	defer conn.endOperation()
+	infos, fields, err := buildBatch(conn, reflect.TypeFor[T](), handles)
+	if err != nil {
+		return nil, err
+	}
+	return &BatchReader[T]{conn: conn, handles: infos, fields: fields, commands: make([]sumReadSubCommand, len(infos))}, nil
+}
+
+// Read replaces target only if every field succeeds; it does not promise a PLC scan snapshot.
+func (br *BatchReader[T]) Read(target *T) error {
+	if target == nil {
+		return fmt.Errorf("nil batch target")
+	}
+	br.mu.Lock()
+	defer br.mu.Unlock()
+	if err := br.conn.beginOperation(); err != nil {
+		return err
+	}
+	defer br.conn.endOperation()
+	for i := range br.handles {
+		if err := ensureHandleInfoBound(&br.handles[i]); err != nil {
+			return err
+		}
+		h := br.handles[i]
+		br.commands[i] = sumReadSubCommand{Group: uint32(GroupSymbolValueByHandle), Offset: h.handle, Length: h.length}
+	}
+	results, err := br.conn.sumRead(br.commands, true)
+	if err != nil {
+		return err
+	}
+	var out T
+	value := reflect.ValueOf(&out).Elem()
+	var failures []BatchFieldError
+	for i, h := range br.handles {
+		field := br.fields[i]
+		if results[i].Error != ReturnCodeNoErrors {
+			failures = append(failures, BatchFieldError{Field: field.name, Symbol: h.symbolName, ADSCode: results[i].Error})
+			continue
+		}
+		if err := h.codec.decode(value.FieldByIndex(field.index), results[i].Data); err != nil {
+			failures = append(failures, BatchFieldError{Field: field.name, Symbol: h.symbolName, Message: err.Error()})
+		}
+	}
+	if len(failures) > 0 {
+		return &BatchReadError{failures, len(br.handles)}
+	}
+	*target = out
+	return nil
+}
+
 type BatchFieldError struct {
 	Field   string
 	Symbol  string
 	ADSCode ReturnCode
 	Message string
 }
-
-// BatchReadError represents errors from a batch read operation.
 type BatchReadError struct {
 	FieldErrors []BatchFieldError
 	TotalFields int
@@ -261,8 +196,4 @@ type BatchReadError struct {
 func (e *BatchReadError) Error() string {
 	return fmt.Sprintf("batch read failed for %d/%d fields", len(e.FieldErrors), e.TotalFields)
 }
-
-// GetFieldErrors returns all field-specific errors from the batch read.
-func (e *BatchReadError) GetFieldErrors() []BatchFieldError {
-	return e.FieldErrors
-}
+func (e *BatchReadError) GetFieldErrors() []BatchFieldError { return e.FieldErrors }

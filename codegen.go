@@ -2,7 +2,10 @@ package ads
 
 import (
 	"fmt"
+	"go/token"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // =============================================================================
@@ -46,7 +49,9 @@ type GeneratedFieldInfo struct {
 //	//     RealField ads.Float32 `ads:"real_field"`
 //	// }
 func (conn *Connection) GenerateType(symbolName string) (string, error) {
-	symbol, err := conn.GetSymbol(symbolName)
+	conn.generationLock.RLock()
+	defer conn.generationLock.RUnlock()
+	symbol, err := conn.symbolMetadata(symbolName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get symbol %s: %w", symbolName, err)
 	}
@@ -69,11 +74,20 @@ func (conn *Connection) GenerateType(symbolName string) (string, error) {
 //	//     IntField ads.Int16 `ads:"int_field"`
 //	//     RealField ads.Float32 `ads:"real_field"`
 func (conn *Connection) GenerateStructBody(symbolName string) (string, error) {
-	symbol, err := conn.GetSymbol(symbolName)
+	conn.generationLock.RLock()
+	defer conn.generationLock.RUnlock()
+	symbol, err := conn.symbolMetadata(symbolName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get symbol %s: %w", symbolName, err)
 	}
 
+	info, err := conn.analyzeSymbol(symbol)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsStruct {
+		return "", fmt.Errorf("symbol is not a struct")
+	}
 	return conn.generateStructBody(symbol, ""), nil
 }
 
@@ -82,9 +96,14 @@ func (conn *Connection) GenerateStructBody(symbolName string) (string, error) {
 // This is useful for generating dependent struct types referenced by arrays
 // or other structs.
 func (conn *Connection) GenerateTypeFrom(symbol *Symbol, goTypeName string) (string, error) {
+	conn.generationLock.RLock()
+	defer conn.generationLock.RUnlock()
 	info, err := conn.analyzeSymbol(symbol)
 	if err != nil {
 		return "", fmt.Errorf("failed to analyze symbol: %w", err)
+	}
+	if !token.IsIdentifier(goTypeName) || token.Lookup(goTypeName).IsKeyword() {
+		return "", fmt.Errorf("invalid Go type name %q", goTypeName)
 	}
 	info.GoName = goTypeName
 	if info.IsStruct {
@@ -96,7 +115,9 @@ func (conn *Connection) GenerateTypeFrom(symbol *Symbol, goTypeName string) (str
 // AnalyzeType returns detailed information about an ADS symbol's type structure
 // without generating code. Useful for programmatic type inspection.
 func (conn *Connection) AnalyzeType(symbolName string) (*GeneratedTypeInfo, error) {
-	symbol, err := conn.GetSymbol(symbolName)
+	conn.generationLock.RLock()
+	defer conn.generationLock.RUnlock()
+	symbol, err := conn.symbolMetadata(symbolName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get symbol %s: %w", symbolName, err)
 	}
@@ -109,120 +130,44 @@ func (conn *Connection) AnalyzeType(symbolName string) (*GeneratedTypeInfo, erro
 // =============================================================================
 
 // analyzeSymbol analyzes an ADS symbol and returns type information
+func (conn *Connection) symbolMetadata(name string) (*Symbol, error) {
+	conn.symbolLock.Lock()
+	defer conn.symbolLock.Unlock()
+	symbol, ok := conn.symbols[name]
+	if !ok {
+		return nil, fmt.Errorf("symbol %s does not exist", name)
+	}
+	return symbol, nil
+}
 func (conn *Connection) analyzeSymbol(symbol *Symbol) (*GeneratedTypeInfo, error) {
-	info := &GeneratedTypeInfo{
-		Name:   symbol.FullName,
-		GoName: goName(symbol.FullName),
-		Type:   symbol.DataType,
+	if symbol == nil {
+		return nil, fmt.Errorf("nil symbol")
 	}
-
-	// Resolve custom types
-	baseType, err := resolveType(conn, symbol.DataType)
-	if err != nil {
-		baseType = symbol.DataType // Fallback to original type
-	}
-
-	if Registry.IsKnownType(baseType) {
-		// Primitive or basic type
-		if enumGoType := conn.enumGoType(symbol.DataType); enumGoType != "" {
-			info.GoType = enumGoType
-		} else {
-			info.GoType = qualifiedGoType(Registry.GetGoType(baseType))
-		}
-		info.IsStruct = false
-		info.IsArray = false
-	} else if isArraySymbol(symbol) {
-		// Array type
+	info := &GeneratedTypeInfo{Name: symbol.FullName, GoName: goName(symbol.FullName), Type: symbol.DataType}
+	if isArraySymbol(symbol) {
 		info.IsArray = true
-		info.IsStruct = false
-
-		// Analyze array element type
-		if len(symbol.Children) > 0 {
-			// Get first element to determine element type
-			var firstChild *Symbol
-			for _, child := range symbol.Children {
-				firstChild = child
-				break
-			}
-			if firstChild != nil {
-				elemBaseType, _ := resolveType(conn, firstChild.DataType)
-				if elemBaseType == "" {
-					elemBaseType = firstChild.DataType // Fallback
-				}
-				elemGoType := qualifiedGoType(Registry.GetGoType(elemBaseType))
-				if enumGoType := conn.enumGoType(firstChild.DataType); enumGoType != "" {
-					elemGoType = enumGoType
-				}
-				if !Registry.IsKnownType(elemBaseType) {
-					// Array of structs - need to define element type
-					elemGoType = goName(firstChild.DataType)
-				}
-				arraySize := len(symbol.Children)
-				info.GoType = fmt.Sprintf("[%d]%s", arraySize, elemGoType)
-			}
-		}
-	} else {
-		// Struct type
+		info.GoType = conn.generateGoTypeString(symbol, "")
+	} else if len(symbol.Children) > 0 {
 		info.IsStruct = true
 		info.GoType = info.GoName
-
-		// Analyze struct fields
-		fields := getFieldsByOffset(symbol)
-		for _, field := range fields {
-			fieldInfo := conn.analyzeField(field)
-			info.Fields = append(info.Fields, fieldInfo)
+		for _, child := range getFieldsByOffset(symbol) {
+			info.Fields = append(info.Fields, conn.analyzeField(child))
+		}
+	} else {
+		info.GoType = conn.generateGoTypeString(symbol, "")
+	}
+	if strings.Contains(info.GoType, "interface{}") {
+		return nil, fmt.Errorf("unsupported ADS type %s", symbol.DataType)
+	}
+	for _, field := range info.Fields {
+		if strings.Contains(field.GoType, "interface{}") {
+			return nil, fmt.Errorf("unsupported ADS type %s", field.Type)
 		}
 	}
-
 	return info, nil
 }
-
-// analyzeField analyzes a single field and returns field information
 func (conn *Connection) analyzeField(field *Symbol) GeneratedFieldInfo {
-	baseType, _ := resolveType(conn, field.DataType)
-	if baseType == "" {
-		baseType = field.DataType // Fallback
-	}
-	goType := qualifiedGoType(Registry.GetGoType(baseType))
-	if enumGoType := conn.enumGoType(field.DataType); enumGoType != "" {
-		goType = enumGoType
-	}
-
-	// Handle nested structs
-	if !Registry.IsKnownType(baseType) && len(field.Children) > 0 && !isArraySymbol(field) {
-		// Nested struct - use type name
-		goType = goName(field.DataType)
-	}
-
-	// Handle arrays within structs
-	if isArraySymbol(field) && len(field.Children) > 0 {
-		var firstChild *Symbol
-		for _, child := range field.Children {
-			firstChild = child
-			break
-		}
-		if firstChild != nil {
-			elemBaseType, _ := resolveType(conn, firstChild.DataType)
-			if elemBaseType == "" {
-				elemBaseType = firstChild.DataType // Fallback
-			}
-			elemGoType := qualifiedGoType(Registry.GetGoType(elemBaseType))
-			if !Registry.IsKnownType(elemBaseType) {
-				elemGoType = goName(firstChild.DataType)
-			}
-			arraySize := len(field.Children)
-			goType = fmt.Sprintf("[%d]%s", arraySize, elemGoType)
-		}
-	}
-
-	return GeneratedFieldInfo{
-		Name:   field.Name,
-		GoName: goName(field.Name),
-		Type:   field.DataType,
-		GoType: goType,
-		Tag:    field.Name,
-		Offset: field.Offset,
-	}
+	return GeneratedFieldInfo{Name: field.Name, GoName: goName(field.Name), Type: field.DataType, GoType: conn.generateGoTypeString(field, "    "), Tag: field.Name, Offset: field.Offset}
 }
 
 // generateTypeCode generates the complete Go code for a type
@@ -239,7 +184,12 @@ func (conn *Connection) generateTypeCode(info *GeneratedTypeInfo) (string, error
 			info.GoName, info.Type, info.Name, info.GoName, info.GoType), nil
 	}
 
-	// Primitive type alias
+	// Keep time types as aliases so their codec identity is retained.
+	if info.GoType == "time.Time" || info.GoType == "time.Duration" {
+		infoCopy := *info
+		info = &infoCopy
+		info.GoType = "= " + info.GoType
+	}
 	return fmt.Sprintf("// %s represents TwinCAT %s variable\n"+
 		"// Symbol: %s\n"+
 		"type %s %s\n",
@@ -255,8 +205,8 @@ func (conn *Connection) generateStructCode(info *GeneratedTypeInfo) (string, err
 	fmt.Fprintf(&builder, "type %s struct {\n", info.GoName)
 
 	for _, field := range info.Fields {
-		fmt.Fprintf(&builder, "\t%s %s `ads:\"%s\"`\n",
-			field.GoName, field.GoType, field.Tag)
+		fmt.Fprintf(&builder, "\t%s %s %s\n",
+			field.GoName, field.GoType, strconv.Quote("ads:"+strconv.Quote(field.Tag)))
 	}
 
 	builder.WriteString("}\n")
@@ -271,8 +221,8 @@ func (conn *Connection) generateStructBody(symbol *Symbol, indent string) string
 	fields := getFieldsByOffset(symbol)
 	for _, field := range fields {
 		goType := conn.generateGoTypeString(field, indent+"    ")
-		fmt.Fprintf(&builder, "%s    %s %s `ads:\"%s\"`\n",
-			indent, goName(field.Name), goType, field.Name)
+		fmt.Fprintf(&builder, "%s    %s %s %s\n",
+			indent, goName(field.Name), goType, strconv.Quote("ads:"+strconv.Quote(field.Name)))
 	}
 
 	return builder.String()
@@ -289,11 +239,7 @@ func (conn *Connection) generateGoTypeString(symbol *Symbol, indent string) stri
 	if isArraySymbol(symbol) {
 		size := len(symbol.Children)
 		if size > 0 {
-			var firstChild *Symbol
-			for _, child := range symbol.Children {
-				firstChild = child
-				break
-			}
+			firstChild := getFieldsByOffset(symbol)[0]
 			if firstChild != nil {
 				elemType := conn.generateGoTypeString(firstChild, indent)
 				return fmt.Sprintf("[%d]%s", size, elemType)
@@ -303,7 +249,7 @@ func (conn *Connection) generateGoTypeString(symbol *Symbol, indent string) stri
 	}
 
 	// Handle nested structs
-	if !Registry.IsKnownType(baseType) && len(symbol.Children) > 0 {
+	if len(symbol.Children) > 0 {
 		nested := conn.generateStructBody(symbol, indent)
 		return fmt.Sprintf("struct {\n%s    }", nested)
 	}
@@ -353,20 +299,25 @@ var goTypeQualified = map[string]string{
 
 // goName converts TwinCAT naming to Go naming
 func goName(name string) string {
-	parts := strings.Split(name, ".")
-	var builder strings.Builder
-	for _, part := range parts {
-		builder.WriteString(capitalize(part))
+	var out strings.Builder
+	upper := true
+	for _, r := range name {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			upper = true
+			continue
+		}
+		if out.Len() == 0 && !unicode.IsLetter(r) {
+			out.WriteByte('X')
+		}
+		if upper {
+			r = unicode.ToUpper(r)
+			upper = false
+		}
+		out.WriteRune(r)
 	}
-	return builder.String()
-}
-
-// capitalize capitalizes the first letter of a string
-func capitalize(s string) string {
-	if len(s) == 0 {
-		return s
+	if out.Len() == 0 {
+		return "X"
 	}
-	return strings.ToUpper(s[:1]) + s[1:]
+	return out.String()
 }
-
-// isArraySymbol checks if a symbol represents an array
+func capitalize(s string) string { return goName(s) }

@@ -13,8 +13,6 @@ type states struct {
 }
 
 func (conn *Connection) ReadState() (response states, err error) {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
 	// Try to send the request
 	resp, err := conn.sendRequest(CommandIDReadState, []byte{})
 	slog.Debug("response from plc for state", "data", resp)

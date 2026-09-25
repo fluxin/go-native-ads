@@ -1,7 +1,6 @@
 package ads
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 )
@@ -12,15 +11,18 @@ type readWriteResponseHeader struct {
 }
 
 func parseReadWritePayloadResponse(op string, resp []byte, expectedLength *uint32) ([]byte, error) {
-	respBuf := bytes.NewBuffer(resp)
-	var header readWriteResponseHeader
-	if err := binary.Read(respBuf, binary.LittleEndian, &header); err != nil {
-		return nil, fmt.Errorf("failed to parse %s response header: %w", op, err)
+	if len(resp) < 4 {
+		return nil, fmt.Errorf("short %s response", op)
 	}
-	if header.Error != ReturnCodeNoErrors {
-		return nil, fmt.Errorf("ADS error %d in %s", header.Error, op)
+	code := ReturnCode(binary.LittleEndian.Uint32(resp))
+	if code != ReturnCodeNoErrors {
+		return nil, &ProtocolError{Operation: op, Code: code}
 	}
-	payload := respBuf.Bytes()
+	if len(resp) < 8 {
+		return nil, fmt.Errorf("short %s response header", op)
+	}
+	header := readWriteResponseHeader{Length: binary.LittleEndian.Uint32(resp[4:])}
+	payload := resp[8:]
 	if header.Length != uint32(len(payload)) {
 		return nil, fmt.Errorf("invalid %s payload length: header=%d actual=%d", op, header.Length, len(payload))
 	}
@@ -37,20 +39,23 @@ func parseErrorOnlyResponse(op string, resp []byte) error {
 	}
 	adsErr := ReturnCode(binary.LittleEndian.Uint32(resp))
 	if adsErr != ReturnCodeNoErrors {
-		return fmt.Errorf("ADS error %d in %s", adsErr, op)
+		return &ProtocolError{Operation: op, Code: adsErr}
 	}
 	return nil
 }
 
 func parseErrorWithFixedPayload(op string, resp []byte, payloadSize int) ([]byte, error) {
 	const errorSize = 4
+	if len(resp) < errorSize {
+		return nil, fmt.Errorf("short %s response", op)
+	}
+	code := ReturnCode(binary.LittleEndian.Uint32(resp))
+	if code != ReturnCodeNoErrors {
+		return nil, &ProtocolError{Operation: op, Code: code}
+	}
 	expectedLen := errorSize + payloadSize
 	if len(resp) != expectedLen {
 		return nil, fmt.Errorf("invalid %s response length: expected=%d actual=%d", op, expectedLen, len(resp))
-	}
-	adsErr := ReturnCode(binary.LittleEndian.Uint32(resp[:errorSize]))
-	if adsErr != ReturnCodeNoErrors {
-		return nil, fmt.Errorf("ADS error %d in %s", adsErr, op)
 	}
 	return resp[errorSize:], nil
 }

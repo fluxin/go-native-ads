@@ -1,11 +1,13 @@
 package ads
 
 import (
-	"fmt"
+	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"math/rand"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,6 +42,12 @@ func DefaultReconnectPolicy() ReconnectPolicy {
 }
 
 func normalizeReconnectPolicy(policy ReconnectPolicy) ReconnectPolicy {
+	if policy == (ReconnectPolicy{}) {
+		return DefaultReconnectPolicy()
+	}
+	if policy.MaxBackoff <= 0 {
+		policy.MaxBackoff = 10 * time.Second
+	}
 	if policy.InitialBackoff <= 0 {
 		policy.InitialBackoff = 500 * time.Millisecond
 	}
@@ -65,34 +73,80 @@ func (conn *Connection) reconnectPolicySnapshot() ReconnectPolicy {
 	return conn.reconnectPolicy
 }
 
+var ErrNotConnected = errors.New("connection is not ready")
+
+func (conn *Connection) setState(state connectionState) {
+	conn.stateLock.Lock()
+	defer conn.stateLock.Unlock()
+	if conn.state != connectionStateClosed {
+		conn.state = state
+	}
+}
+func (conn *Connection) publishConnected() error {
+	conn.stateLock.Lock()
+	defer conn.stateLock.Unlock()
+	if conn.ctx.Err() != nil || conn.state == connectionStateClosed {
+		return net.ErrClosed
+	}
+	if conn.testReconnectConnectFn == nil {
+		conn.transportLock.Lock()
+		ctx := conn.transportCtx
+		conn.transportLock.Unlock()
+		if ctx == nil || ctx.Err() != nil {
+			return net.ErrClosed
+		}
+	}
+	conn.state = connectionStateConnected
+	return nil
+}
+
+// Add and Wait are serialized with the transition to Closed.
+func (conn *Connection) startBackground(fn func()) bool {
+	conn.stateLock.Lock()
+	defer conn.stateLock.Unlock()
+	if conn.state == connectionStateClosed || (conn.ctx != nil && conn.ctx.Err() != nil) {
+		return false
+	}
+	conn.backgroundGroup.Add(1)
+	go func() { defer conn.backgroundGroup.Done(); fn() }()
+	return true
+}
 func (conn *Connection) onTransportError(err error) {
-	if err == nil {
+	if err == nil || conn.ctx.Err() != nil {
 		return
 	}
-	if conn.ctx.Err() != nil {
-		return
+	conn.transportLock.Lock()
+	if conn.transportCancel != nil {
+		conn.transportCancel()
 	}
+	if conn.connection != nil {
+		_ = conn.connection.Close()
+	}
+	conn.transportLock.Unlock()
 	conn.stateLock.Lock()
 	if conn.state == connectionStateClosed {
 		conn.stateLock.Unlock()
 		return
 	}
-	policy := conn.reconnectPolicy
-	if !policy.Enabled {
-		conn.state = connectionStateDisconnected
-		conn.stateLock.Unlock()
-		return
+	enabled := conn.reconnectPolicy.Enabled
+	conn.state = connectionStateDisconnected
+	if enabled {
+		conn.state = connectionStateReconnecting
 	}
 	conn.stateLock.Unlock()
+	if !enabled {
+		return
+	}
 	select {
 	case conn.reconnectSignal <- struct{}{}:
 	default:
 	}
 	if conn.reconnectRunning.CompareAndSwap(false, true) {
-		go conn.reconnectLoop()
+		if !conn.startBackground(conn.reconnectLoop) {
+			conn.reconnectRunning.Store(false)
+		}
 	}
 }
-
 func (conn *Connection) reconnectLoop() {
 	defer conn.reconnectRunning.Store(false)
 	for {
@@ -100,72 +154,67 @@ func (conn *Connection) reconnectLoop() {
 		case <-conn.ctx.Done():
 			return
 		case <-conn.reconnectSignal:
-			conn.stateLock.Lock()
-			if conn.state == connectionStateClosed {
-				conn.stateLock.Unlock()
+		}
+		policy := conn.reconnectPolicySnapshot()
+		for attempt := 1; policy.MaxAttempts <= 0 || attempt <= policy.MaxAttempts; attempt++ {
+			if conn.ctx.Err() != nil {
 				return
 			}
-			conn.state = connectionStateReconnecting
-			policy := conn.reconnectPolicy
+			conn.connectLock.Lock()
+			conn.generationLock.Lock()
+			conn.stateLock.Lock()
+			alreadyConnected := conn.state == connectionStateConnected
 			conn.stateLock.Unlock()
-
-			attempt := 0
-			for {
-				if conn.ctx.Err() != nil {
-					return
-				}
-				attempt++
-				if policy.MaxAttempts > 0 && attempt > policy.MaxAttempts {
-					slog.Error("reconnect stopped after max attempts", "attempts", attempt-1)
-					conn.stateLock.Lock()
-					if conn.state != connectionStateClosed {
-						conn.state = connectionStateDisconnected
-					}
-					conn.stateLock.Unlock()
-					break
-				}
-
-				conn.stopTransport()
-
-				conn.connectLock.Lock()
-				err := conn.reconnectConnectStep()
-				if err == nil {
-					conn.reconnectRefreshStep()
-					conn.stateLock.Lock()
-					conn.state = connectionStateConnected
-					conn.stateLock.Unlock()
-					conn.epoch.Add(1)
-					conn.connectLock.Unlock()
-					slog.Info("ADS connection re-established", "attempt", attempt)
-					break
-				}
+			if alreadyConnected {
+				conn.generationLock.Unlock()
 				conn.connectLock.Unlock()
-				slog.Warn("ADS reconnect failed", "attempt", attempt, "error", err)
-
-				backoff := jitteredBackoff(policy, attempt)
-				select {
-				case <-time.After(backoff):
-				case <-conn.ctx.Done():
-					return
+				break
+			}
+			conn.setState(connectionStateReconnecting)
+			conn.stopTransport()
+			var err error
+			if conn.testReconnectConnectFn != nil {
+				err = conn.testReconnectConnectFn()
+			} else {
+				err = conn.connectWithMetadata()
+			}
+			if err == nil {
+				if conn.testReconnectRefreshFn != nil {
+					conn.testReconnectRefreshFn()
+				} else {
+					conn.refreshAfterReconnect()
 				}
+				conn.epoch.Add(1)
+				err = conn.publishConnected()
+			}
+			if err != nil {
+				conn.setState(connectionStateReconnecting)
+			}
+			// Errors while bootstrapping are handled by this retry, not a second reconnect.
+			select {
+			case <-conn.reconnectSignal:
+			default:
+			}
+			conn.generationLock.Unlock()
+			conn.connectLock.Unlock()
+			if err == nil {
+				break
+			}
+			slog.Debug("ADS reconnect failed", "attempt", attempt, "error", err)
+			timer := time.NewTimer(jitteredBackoff(policy, attempt))
+			select {
+			case <-timer.C:
+			case <-conn.ctx.Done():
+				timer.Stop()
+				return
 			}
 		}
+		conn.stateLock.Lock()
+		if conn.state == connectionStateReconnecting {
+			conn.state = connectionStateDisconnected
+		}
+		conn.stateLock.Unlock()
 	}
-}
-
-func (conn *Connection) reconnectConnectStep() error {
-	if conn.testReconnectConnectFn != nil {
-		return conn.testReconnectConnectFn()
-	}
-	return conn.connectWithMetadata()
-}
-
-func (conn *Connection) reconnectRefreshStep() {
-	if conn.testReconnectRefreshFn != nil {
-		conn.testReconnectRefreshFn()
-		return
-	}
-	conn.refreshAfterReconnect()
 }
 
 func jitteredBackoff(policy ReconnectPolicy, attempt int) time.Duration {
@@ -185,7 +234,6 @@ func jitteredBackoff(policy ReconnectPolicy, attempt int) time.Duration {
 }
 
 func (conn *Connection) refreshAfterReconnect() {
-	conn.cleanupActiveNotificationHandles()
 	conn.symbolLock.Lock()
 	conn.resetNotificationStateLocked()
 	subs := conn.subscriptionSnapshotLocked()
@@ -197,38 +245,26 @@ func (conn *Connection) refreshAfterReconnect() {
 func (conn *Connection) ensureConnected() error {
 	conn.stateLock.Lock()
 	state := conn.state
-	policy := conn.reconnectPolicy
 	conn.stateLock.Unlock()
-
 	if state == connectionStateConnected {
 		return nil
 	}
-	if state == connectionStateConnecting {
-		return nil
-	}
-	if state == connectionStateReconnecting {
-		return nil
-	}
 	if state == connectionStateClosed {
-		return fmt.Errorf("connection is closed")
+		return net.ErrClosed
 	}
-	if !policy.Enabled {
-		return fmt.Errorf("connection is not active")
-	}
-
-	conn.onTransportError(net.ErrClosed)
-	deadline := time.Now().Add(policy.MaxBackoff + policy.InitialBackoff)
-	for time.Now().Before(deadline) {
-		conn.stateLock.Lock()
-		if conn.state == connectionStateConnected {
-			conn.stateLock.Unlock()
-			return nil
-		}
-		conn.stateLock.Unlock()
-		time.Sleep(20 * time.Millisecond)
-	}
-	return fmt.Errorf("connection is reconnecting")
+	return ErrNotConnected
 }
+
+// The generation read lock pins schema and binding information for a typed operation.
+func (conn *Connection) beginOperation() error {
+	conn.generationLock.RLock()
+	if err := conn.ensureConnected(); err != nil {
+		conn.generationLock.RUnlock()
+		return err
+	}
+	return nil
+}
+func (conn *Connection) endOperation() { conn.generationLock.RUnlock() }
 
 type subscriptionSpec struct {
 	id         uint64
@@ -241,4 +277,10 @@ type subscriptionSpec struct {
 	cycleTime  time.Duration
 	callback   NotificationCallback
 	adsHandle  uint32
+	factory    func(*Symbol, map[string]SymbolUploadDataType) (NotificationCallback, error)
+	delivery   *notificationDelivery
+	err        error
+	dropped    atomic.Uint64
+	cancel     context.CancelFunc
+	ctx        context.Context
 }

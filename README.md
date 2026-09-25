@@ -12,7 +12,7 @@ based on my original implementation and cleaned up for modern golang. Generics a
 - Route helpers are implemented for UDP-based NetID discovery and credentialed PLC route creation.
 - `examples/simple/main.go` is now a comprehensive live PLC smoke test that exercises primitives, time values, structs, arrays (including whole-array-of-structs read/write), batch operations, notifications, and type-safety failures.
 - `examples/add_route/main.go` provides a focused route helper smoke program.
-- Latest reported live PLC smoke execution passed all checks (12/12).
+- Offline hardening tests cover real socket bootstrap/reconnect, codec validation, bounded notification delivery, malformed metadata, and generated-package compilation. The earlier live PLC smoke reported 12/12; the hardening changes still need a live PLC rerun.
 
 ## Install
 
@@ -89,6 +89,26 @@ err = router.UnregisterPort(assigned.Port)
 
 `UnixSocketPath` defaults to `/run/ams/tcsyssrv.ams.sock`. Set it when using a nonstandard TwinCAT/AMS router socket path.
 
+## Lifecycle and delivery contracts
+
+- Connect/reconnect/schema refresh publish a complete generation. Typed operations pin that generation; handles and batches rebind and revalidate after it changes. Application requests fail with `ErrNotConnected` while disconnected. In-flight writes are never automatically replayed.
+- `RequestTimeout` defaults to four seconds; `MaxFrameSize` defaults to 16 MiB. Transport failure cancels outstanding requests promptly. `Close` rejects new work, cancels owned workers, and gives best-effort remote releases a shared 100 ms budget.
+- A zero `ReconnectPolicy` uses `DefaultReconnectPolicy()`. For a nonzero policy, zero backoff durations get defaults; jitter and boolean fields are honored literally. To customize defaults, start with `DefaultReconnectPolicy()` and change its fields.
+- Each subscription has one ordered worker with up to 64 queued samples and 1 MiB of queued payload. When full, new samples are dropped; `Subscription.Dropped()` reports the count. Keep the consumer channel open until `Cancel` returns. `Cancel` stops local delivery before deleting the remote registration.
+- Restoration recompiles the decoder against current metadata. `Subscription.Err()` reports restoration/decoding failures; `Retry()` retries an inactive subscription. Cancellation takes precedence over an in-progress restoration.
+- Batch operations use one sum request and can have partial PLC success. `BatchReader.Read` changes its Go destination only when every field succeeds; it does not guarantee a same-scan PLC snapshot. `BatchWriter.Write` cannot roll back successful subcommands.
+- Metadata is treated as immutable. Do not modify returned Symbol trees or registry entries. Parsing is bounded to 64 nesting levels and 100,000 expanded metadata nodes. Unknown-notification buffering is bounded and expires after five seconds.
+- Low-level sum calls accept exported `SumReadCommand` / `SumWriteCommand` values. `ProtocolError` preserves AMS/ADS error codes for `errors.As`.
+
+## Code generation
+
+The CLI emits formatted standalone Go files with required imports, inline nested struct definitions, multidimensional arrays, enums, and aliases for time types. Identifier collisions are rejected. Run it from its own module:
+
+```bash
+cd cmd/codegen
+go run . -symbols=MAIN.counter,MAIN.values -o=generated_types.go -pkg=plc
+```
+
 ## Verified behavior
 
 - `Connect()` uploads/caches symbol and datatype metadata.
@@ -100,8 +120,8 @@ err = router.UnregisterPort(assigned.Port)
 - Enum metadata can be queried at runtime with `GetEnum`, and codegen emits enum type/const definitions.
 - `SumRead`/`SumWrite` use `ReadWrite` with groups `0xF080` / `0xF081`.
 - Notification `CycleTime` and `MaxDelay` are encoded as ADS ticks (100ns).
-- Primitive and `time.Time` handles are validated at acquisition; struct/array compatibility is validated during encode/decode.
-- Array encoding/decoding uses symbol child ordering, supports non-zero lower bounds, and handles all element types (primitives, structs, nested arrays).
+- Handles and batch fields compile a shared validated codec at acquisition and after schema changes. Nested primitive types, widths, field accessibility, array shapes, and offsets are checked before writes.
+- Array encoding/decoding caches ordered layouts and supports negative lower bounds, multidimensional arrays, structs, and nested arrays.
 - Type mismatch errors include the symbol name, Go type, and ADS type for quick diagnosis.
 
 ## Supported mapping
@@ -118,48 +138,47 @@ err = router.UnregisterPort(assigned.Port)
 - `REAL` -> `float32`
 - `LREAL` -> `float64`
 - `STRING` -> `string`
-- `TIME`/`TOD`/`DATE`/`DT` -> `time.Time`
+- `TIME` -> `time.Duration` (nonnegative, up to `math.MaxUint32` milliseconds)
+- `TOD`/`DATE`/`DT` -> `time.Time` (`TOD` decodes on 1970-01-01 UTC without a timezone offset)
 
 ## Testing
 
 ```bash
-go test ./...
+go test -race ./...
 go vet ./...
+(cd cmd/codegen && go test ./... && go vet ./...)
+(cd examples/simple && go test ./... && go vet ./...)
+(cd examples/add_route && go test ./... && go vet ./...)
+go test -run='^$' -bench=BenchmarkReview -benchmem
+go test -run='^$' -fuzz=FuzzDatatypeUpload -fuzztime=10s
 ```
 
-Live PLC smoke test (local):
+The root module does not include the nested CLI/example modules in its ./... traversal.
+
+Live PLC smoke tests (these write PLC values):
 
 ```bash
-go run examples/simple/main.go
-```
-
-Live PLC smoke test (remote):
-
-```bash
-go run examples/simple/main.go -ip=<PLC_IP> -netid=<PLC_NETID>
+(cd examples/simple && go run .)
+(cd examples/simple && go run . -ip=<PLC_IP> -netid=<PLC_NETID>)
 ```
 
 Regenerate enum wrappers used by the simple smoke test:
 
 ```bash
-go generate ./examples/simple
+(cd examples/simple && go generate .)
 ```
 
-Route helper smoke test (credentialed PLC route creation):
+Credentialed route-helper smoke test:
 
 ```bash
-go run examples/add_route/main.go \
-  -plc-ip=<PLC_IP> \
-  -sending-netid=<CLIENT_NETID> \
-  -adding-hostname=<CLIENT_NAME> \
-  -username=<PLC_USER> \
-  -password=<PLC_PASSWORD>
+(cd examples/add_route && go run . -plc-ip=<PLC_IP> -sending-netid=<CLIENT_NETID> -adding-hostname=<CLIENT_NAME> -username=<PLC_USER> -password=<PLC_PASSWORD>)
 ```
 
 ## Known limitations
 
-- No automated live PLC CI in this repo.
-- Sum commands are capped at 500 sub-commands.
+- No automated live PLC CI in this repo; offline tests use a local fake AMS router.
+- Sum commands are capped at 500 subcommands and the configured frame size.
+- Notification overflow drops new samples and must be monitored by applications requiring loss detection.
 - RPC invoke support remains deferred.
 
 ## License

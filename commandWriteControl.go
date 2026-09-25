@@ -31,8 +31,6 @@ func encodeWriteControlRequest(adsState AdsState, deviceState uint16, data []byt
 }
 
 func (conn *Connection) writeControl(adsState AdsState, deviceState uint16, data []byte) error {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
 
 	request, err := encodeWriteControlRequest(adsState, deviceState, data)
 	if err != nil {

@@ -1,7 +1,6 @@
 package ads
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -37,112 +36,156 @@ const (
 	unknownNotificationCleanupDelay  = 5 * time.Second
 )
 
-// deviceNotification - ADS command id: 8
+const maxPendingNotificationHandles = 256
+const maxPendingNotificationBytes = 1 << 20
+
 func (conn *Connection) deviceNotification(ctx context.Context, in []byte) error {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
-	slog.Debug("processing device notification payload", "dataLen", len(in))
-
-	var stream notificationStream
-	var header stampHeader
-	var sample notificationSample
-	var content []byte
-
-	data := bytes.NewBuffer(in)
-
-	err := binary.Read(data, binary.LittleEndian, &stream)
-	if err != nil {
-		return fmt.Errorf("unable to read notification %v", err)
+	if len(in) < 8 {
+		return fmt.Errorf("short notification stream")
 	}
-	slog.Debug("parsed device notification stream", "stamps", stream.Stamps, "length", stream.Length)
-	for i := uint32(0); i < stream.Stamps; i++ {
-		err := binary.Read(data, binary.LittleEndian, &header)
-		if err != nil {
-			return fmt.Errorf("unable to read stamp header: %w", err)
+	// The AMS payload boundary is authoritative, as in Beckhoff AdsLib.
+	// Validate every nested count and size against that boundary before delivery.
+	stamps := binary.LittleEndian.Uint32(in[4:8])
+	offset := 8
+	// Validate the entire frame before publishing any samples.
+	type sampleData struct {
+		handle    uint32
+		timestamp uint64
+		data      []byte
+	}
+	samples := make([]sampleData, 0)
+	for i := uint32(0); i < stamps; i++ {
+		if len(in)-offset < 12 {
+			return fmt.Errorf("short notification stamp")
 		}
-
-		for j := uint32(0); j < header.Samples; j++ {
-			err := binary.Read(data, binary.LittleEndian, &sample)
-			if err != nil {
-				slog.Error("failed to read notification sample header", "error", err)
-				break
+		timestamp := binary.LittleEndian.Uint64(in[offset:])
+		count := binary.LittleEndian.Uint32(in[offset+8:])
+		offset += 12
+		for j := uint32(0); j < count; j++ {
+			if len(in)-offset < 8 {
+				return fmt.Errorf("short notification sample")
 			}
-			content = make([]byte, sample.Size)
-			_, err = data.Read(content)
-			if err != nil {
-				return fmt.Errorf("unable to read notification content: %w", err)
+			handle := binary.LittleEndian.Uint32(in[offset:])
+			size := binary.LittleEndian.Uint32(in[offset+4:])
+			offset += 8
+			if uint64(size) > uint64(len(in)-offset) {
+				return fmt.Errorf("truncated notification sample")
 			}
-			slog.Debug("notification sample decoded", "handle", sample.Handle, "size", sample.Size, "timestamp", header.Timestamp)
-			conn.handleNotification(ctx, sample.Handle, header.Timestamp, content)
+			if len(samples) >= 65536 {
+				return fmt.Errorf("notification sample count exceeds limit")
+			}
+			samples = append(samples, sampleData{handle, timestamp, in[offset : offset+int(size)]})
+			offset += int(size)
 		}
+	}
+	if offset != len(in) {
+		return fmt.Errorf("trailing notification data")
+	}
+	for _, sample := range samples {
+		_ = conn.handleNotification(ctx, sample.handle, sample.timestamp, sample.data)
 	}
 	return nil
 }
-
 func (conn *Connection) handleNotification(ctx context.Context, handle uint32, timestamp uint64, content []byte) error {
 	conn.symbolLock.Lock()
 	callback, ok := conn.activeNotifications[handle]
-	if !ok {
-		policy := conn.reconnectPolicySnapshot()
-		copiedContent := make([]byte, len(content))
-		copy(copiedContent, content)
-		pending := conn.pendingNotifications[handle]
-		if len(pending) >= maxPendingNotificationsPerHandle {
-			pending = pending[1:]
-		}
-		conn.pendingNotifications[handle] = append(pending, pendingNotification{timestamp: timestamp, content: copiedContent})
+	if ok {
 		conn.symbolLock.Unlock()
-		slog.Debug("buffered notification before callback registration", "handle", handle)
-		if policy.DeleteUnknownNotifications {
-			go conn.deleteUnknownNotificationAfterGrace(handle)
-		}
+		return callback(ctx, timestamp, content)
+	}
+	if conn.pendingNotifications == nil {
+		conn.pendingNotifications = make(map[uint32][]pendingNotification)
+	}
+	if conn.unknownCleanup == nil {
+		conn.unknownCleanup = make(map[uint32]bool)
+	}
+	pending := conn.pendingNotifications[handle]
+	if len(pending) == 0 && len(conn.pendingNotifications) >= maxPendingNotificationHandles {
+		conn.symbolLock.Unlock()
 		return nil
 	}
+	nextBytes := conn.pendingBytes + len(content)
+	if len(pending) >= maxPendingNotificationsPerHandle {
+		nextBytes -= len(pending[0].content)
+	}
+	if nextBytes > maxPendingNotificationBytes {
+		conn.symbolLock.Unlock()
+		return nil
+	}
+	if len(pending) >= maxPendingNotificationsPerHandle {
+		pending = pending[1:]
+	}
+	copied := append([]byte(nil), content...)
+	conn.pendingBytes = nextBytes
+	conn.pendingNotifications[handle] = append(pending, pendingNotification{timestamp, copied})
+	generation := conn.notificationGeneration
+	schedule := !conn.unknownCleanup[handle]
+	conn.unknownCleanup[handle] = true
 	conn.symbolLock.Unlock()
-
-	slog.Debug("dispatching notification callback", "handle", handle, "contentLen", len(content))
-	err := callback(ctx, timestamp, content)
-	if err != nil {
-		slog.Error("notification callback failed", "handle", handle, "error", err)
+	if schedule {
+		conn.startBackground(func() { conn.cleanupUnknownNotification(handle, generation) })
 	}
 	return nil
 }
-
 func (conn *Connection) deleteUnknownNotificationAfterGrace(handle uint32) {
+	conn.symbolLock.Lock()
+	generation := conn.notificationGeneration
+	conn.symbolLock.Unlock()
+	conn.cleanupUnknownNotification(handle, generation)
+}
+func (conn *Connection) cleanupUnknownNotification(handle uint32, generation uint64) {
 	delay := unknownNotificationCleanupDelay
 	if conn.testUnknownNotificationDelay > 0 {
 		delay = conn.testUnknownNotificationDelay
 	}
-	if delay > 0 {
-		if conn.ctx != nil {
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-			case <-conn.ctx.Done():
-				return
-			}
-		} else {
-			time.Sleep(delay)
-		}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	ctx := conn.ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
-
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
 	conn.symbolLock.Lock()
-	_, active := conn.activeNotifications[handle]
-	_, pending := conn.pendingNotifications[handle]
-	conn.symbolLock.Unlock()
-	if active || !pending {
+	if generation != conn.notificationGeneration {
+		conn.symbolLock.Unlock()
 		return
 	}
-
+	_, active := conn.activeNotifications[handle]
+	_, pending := conn.pendingNotifications[handle]
+	delete(conn.unknownCleanup, handle)
+	// Expire unknown data even when remote deletion is disabled.
+	for _, item := range conn.pendingNotifications[handle] {
+		conn.pendingBytes -= len(item.content)
+	}
+	delete(conn.pendingNotifications, handle)
+	conn.symbolLock.Unlock()
+	if active || !pending || !conn.reconnectPolicySnapshot().DeleteUnknownNotifications {
+		return
+	}
 	if err := conn.deleteUnknownNotification(handle); err != nil {
-		slog.Debug("failed to delete unknown notification handle", "handle", handle, "error", err)
+		slog.Debug("unknown notification cleanup failed", "error", err)
 	}
 }
-
 func (conn *Connection) deleteUnknownNotification(handle uint32) error {
 	if conn.testDeleteUnknownNotificationFn != nil {
 		return conn.testDeleteUnknownNotificationFn(handle)
 	}
-	return conn.DeleteDeviceNotification(handle)
+	if err := conn.beginOperation(); err != nil {
+		return err
+	}
+	defer conn.endOperation()
+	conn.restoreLock.Lock()
+	defer conn.restoreLock.Unlock()
+	// A late cleanup must not delete a newly registered/reused handle.
+	conn.symbolLock.Lock()
+	_, active := conn.activeNotifications[handle]
+	conn.symbolLock.Unlock()
+	if active {
+		return nil
+	}
+	return conn.deleteDeviceNotification(handle, true)
 }

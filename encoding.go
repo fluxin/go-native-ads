@@ -9,101 +9,78 @@ import (
 	"time"
 )
 
-// encodeStructValue encodes a Go struct value into binary ADS format
-func encodeStructValue(val reflect.Value, symbol *Symbol, data []byte, datatypes map[string]SymbolUploadDataType) error {
-	if val.Kind() == reflect.Pointer {
-		val = val.Elem()
-	}
-
-	if val.Kind() != reflect.Struct {
-		return fmt.Errorf("expected struct, got %s", val.Kind())
-	}
-
-	structType := val.Type()
-
-	// Build map of Go field names to their indices
-	goFields := make(map[string]int)
-	for i := 0; i < structType.NumField(); i++ {
-		field := structType.Field(i)
-		adsName := field.Name
-
-		// Check for ads struct tag
-		if tag := field.Tag.Get("ads"); tag != "" {
-			adsName = tag
-		}
-
-		goFields[adsName] = i
-	}
-
-	// Encode each ADS child field
-	for childName, child := range symbol.Children {
-		goFieldIdx, ok := goFields[childName]
-		if !ok {
-			return generateFieldMismatchError(symbol, childName, val, datatypes)
-		}
-
-		fieldValue := val.Field(goFieldIdx)
-		if err := encodeField(fieldValue, child, data, datatypes); err != nil {
-			return fmt.Errorf("failed to encode field %s: %w", childName, err)
-		}
-	}
-
-	return nil
+func encodeStructValue(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	return encodeValue(v, s, data, types)
 }
-
-// encodeField encodes a single field value into binary format at the correct offset
-func encodeField(fieldVal reflect.Value, child *Symbol, data []byte, datatypes map[string]SymbolUploadDataType) error {
-	offset := int(child.Offset)
-
-	// Handle arrays
-	if len(child.Children) > 0 && isArraySymbol(child) {
-		return encodeArrayField(fieldVal, child, data[offset:], datatypes)
-	}
-
-	// Handle nested structs
-	if len(child.Children) > 0 {
-		return encodeStructValue(fieldVal, child, data[offset:], datatypes)
-	}
-
-	// Handle primitive types
-	return encodePrimitiveField(fieldVal, child, data[offset:offset+int(child.Length)], datatypes)
+func decodeStructValue(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	return decodeValue(v, s, data, types)
 }
-
-// encodeArrayField encodes an array field
-func encodeArrayField(v reflect.Value, child *Symbol, data []byte, datatypes map[string]SymbolUploadDataType) error {
-	if v.Kind() != reflect.Array && v.Kind() != reflect.Slice {
-		return fmt.Errorf("expected array or slice, got %s", v.Kind())
-	}
-	elements := getFieldsByOffset(child)
-	if len(elements) == 0 {
-		return fmt.Errorf("array %s has no element metadata", child.Name)
-	}
-
-	if v.Len() != len(elements) {
-		return generateArrayMismatchError(child.Name, child, v.Len(), len(elements), datatypes)
-	}
-
-	// Encode each element
-	for i := 0; i < v.Len(); i++ {
-		elemValue := v.Index(i)
-		elemChild := elements[i]
-
-		if err := encodeField(elemValue, elemChild, data, datatypes); err != nil {
-			return fmt.Errorf("failed to encode array element %d: %w", i, err)
-		}
-	}
-
-	return nil
+func encodeArrayField(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	return encodeValue(v, s, data, types)
 }
-
-// encodePrimitiveField encodes a primitive value directly to binary
-func encodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes map[string]SymbolUploadDataType) error {
-	// Resolve type (only if resolved type is not empty)
-	dt := child.DataType
-	if typeInfo, ok := datatypes[dt]; ok && typeInfo.DataType != "" {
-		dt = typeInfo.DataType
+func decodeArrayField(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	return decodeValue(v, s, data, types)
+}
+func encodePrimitiveField(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	return encodeValue(v, s, data, types)
+}
+func decodePrimitiveField(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	return decodeValue(v, s, data, types)
+}
+func encodeValue(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	if !v.IsValid() {
+		return fmt.Errorf("invalid encode value")
 	}
-
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		return fmt.Errorf("nil encode value")
+	}
+	node, err := codecFor(v.Type(), s, types)
+	if err != nil {
+		return err
+	}
+	return node.encode(v, data)
+}
+func decodeValue(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	if !v.IsValid() {
+		return fmt.Errorf("invalid decode value")
+	}
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		return fmt.Errorf("nil decode value")
+	}
+	node, err := codecFor(v.Type(), s, types)
+	if err != nil {
+		return err
+	}
+	return node.decode(v, data)
+}
+func fieldData(s *Symbol, data []byte) ([]byte, error) {
+	start, end := uint64(s.Offset), uint64(s.Offset)+uint64(s.Length)
+	if end > uint64(len(data)) {
+		return nil, fmt.Errorf("field %s outside buffer", s.Name)
+	}
+	return data[start:end], nil
+}
+func encodeField(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	buf, err := fieldData(s, data)
+	if err != nil {
+		return err
+	}
+	return encodeValue(v, s, buf, types)
+}
+func decodeField(v reflect.Value, s *Symbol, data []byte, types map[string]SymbolUploadDataType) error {
+	buf, err := fieldData(s, data)
+	if err != nil {
+		return err
+	}
+	return decodeValue(v, s, buf, types)
+}
+func encodePrimitive(v reflect.Value, buf []byte, dt string) error {
 	switch v.Kind() {
 	case reflect.Bool:
 		if v.Bool() {
@@ -121,7 +98,11 @@ func encodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 		if dt == "TIME" {
 			// TIME is a duration in milliseconds (uint32).
 			// time.Duration stores nanoseconds as int64.
-			ms := uint32(time.Duration(v.Int()).Milliseconds())
+			duration := time.Duration(v.Int())
+			if duration < 0 || duration/time.Millisecond > time.Duration(math.MaxUint32) {
+				return fmt.Errorf("TIME outside uint32 milliseconds")
+			}
+			ms := uint32(duration.Milliseconds())
 			binary.LittleEndian.PutUint32(buf, ms)
 		} else {
 			binary.LittleEndian.PutUint64(buf, uint64(v.Int()))
@@ -142,6 +123,10 @@ func encodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 		binary.LittleEndian.PutUint64(buf, bits)
 	case reflect.String:
 		str := v.String()
+		if len(str) >= len(buf) {
+			return fmt.Errorf("STRING needs %d bytes including terminator; capacity %d", len(str)+1, len(buf))
+		}
+		clear(buf)
 		copy(buf, str)
 		// Remaining bytes are already zero from make()
 	case reflect.Struct:
@@ -149,30 +134,34 @@ func encodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 		if v.Type().String() == "time.Time" {
 			return encodeTimeValue(v, buf, dt)
 		}
-		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", child.Name, v.Type(), child.DataType)
+		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", "value", v.Type(), dt)
 	default:
-		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", child.Name, v.Type(), child.DataType)
+		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", "value", v.Type(), dt)
 	}
 
 	return nil
 }
 
-// encodeTimeValue encodes a time.Time value to binary
 func encodeTimeValue(v reflect.Value, buf []byte, dt string) error {
 	t := v.Interface().(time.Time)
 
 	switch dt {
 	case "TOD", "TIME_OF_DAY":
 		// Same as TIME but usually just time portion
-		midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-		ms := uint32(t.Sub(midnight).Milliseconds())
+		ms := uint32((t.Hour()*3600+t.Minute()*60+t.Second())*1000 + t.Nanosecond()/1000000)
 		binary.LittleEndian.PutUint32(buf, ms)
 	case "DATE":
 		// Seconds since Unix epoch
+		if t.Unix() < 0 || t.Unix() > math.MaxUint32 {
+			return fmt.Errorf("date outside uint32 seconds")
+		}
 		sec := uint32(t.Unix())
 		binary.LittleEndian.PutUint32(buf, sec)
 	case "DT", "DATE_AND_TIME":
 		// Seconds since Unix epoch
+		if t.Unix() < 0 || t.Unix() > math.MaxUint32 {
+			return fmt.Errorf("date outside uint32 seconds")
+		}
 		sec := uint32(t.Unix())
 		binary.LittleEndian.PutUint32(buf, sec)
 	default:
@@ -182,101 +171,7 @@ func encodeTimeValue(v reflect.Value, buf []byte, dt string) error {
 	return nil
 }
 
-// decodeStructValue decodes binary ADS data into a Go struct value
-func decodeStructValue(v reflect.Value, symbol *Symbol, data []byte, datatypes map[string]SymbolUploadDataType) error {
-	if v.Kind() == reflect.Pointer {
-		v = v.Elem()
-	}
-
-	if v.Kind() != reflect.Struct {
-		return fmt.Errorf("expected struct, got %s", v.Kind())
-	}
-
-	t := v.Type()
-
-	// Build map of Go field names to their indices
-	goFields := make(map[string]int)
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		adsName := field.Name
-
-		// Check for ads struct tag
-		if tag := field.Tag.Get("ads"); tag != "" {
-			adsName = tag
-		}
-
-		goFields[adsName] = i
-	}
-
-	// Decode each ADS child field
-	for childName, child := range symbol.Children {
-		goFieldIdx, ok := goFields[childName]
-		if !ok {
-			return generateFieldMismatchError(symbol, childName, v, datatypes)
-		}
-
-		fieldValue := v.Field(goFieldIdx)
-		if err := decodeField(fieldValue, child, data, datatypes); err != nil {
-			return fmt.Errorf("failed to decode field %s: %w", childName, err)
-		}
-	}
-
-	return nil
-}
-
-// decodeField decodes a single field from binary data at the correct offset
-func decodeField(v reflect.Value, child *Symbol, data []byte, datatypes map[string]SymbolUploadDataType) error {
-	offset := int(child.Offset)
-
-	// Handle arrays
-	if len(child.Children) > 0 && isArraySymbol(child) {
-		return decodeArrayField(v, child, data[offset:], datatypes)
-	}
-
-	// Handle nested structs
-	if len(child.Children) > 0 {
-		return decodeStructValue(v, child, data[offset:], datatypes)
-	}
-
-	// Handle primitive types
-	return decodePrimitiveField(v, child, data[offset:offset+int(child.Length)], datatypes)
-}
-
-// decodeArrayField decodes an array field from binary data
-func decodeArrayField(v reflect.Value, child *Symbol, data []byte, datatypes map[string]SymbolUploadDataType) error {
-	if v.Kind() != reflect.Array && v.Kind() != reflect.Slice {
-		return fmt.Errorf("expected array or slice, got %s", v.Kind())
-	}
-	elements := getFieldsByOffset(child)
-	if len(elements) == 0 {
-		return fmt.Errorf("array %s has no element metadata", child.Name)
-	}
-
-	if v.Len() != len(elements) {
-		return generateArrayMismatchError(child.Name, child, v.Len(), len(elements), datatypes)
-	}
-
-	// Decode each element
-	for i := 0; i < v.Len(); i++ {
-		elemValue := v.Index(i)
-		elemChild := elements[i]
-
-		if err := decodeField(elemValue, elemChild, data, datatypes); err != nil {
-			return fmt.Errorf("failed to decode array element %d: %w", i, err)
-		}
-	}
-
-	return nil
-}
-
-// decodePrimitiveField decodes a primitive value directly from binary
-func decodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes map[string]SymbolUploadDataType) error {
-	// Resolve type (only if resolved type is not empty)
-	dt := child.DataType
-	if typeInfo, ok := datatypes[dt]; ok && typeInfo.DataType != "" {
-		dt = typeInfo.DataType
-	}
-
+func decodePrimitive(v reflect.Value, buf []byte, dt string) error {
 	switch v.Kind() {
 	case reflect.Bool:
 		v.SetBool(buf[0] != 0)
@@ -321,20 +216,19 @@ func decodePrimitiveField(v reflect.Value, child *Symbol, buf []byte, datatypes 
 		if v.Type().String() == "time.Time" {
 			return decodeTimeValue(v, buf, dt)
 		}
-		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", child.Name, v.Type(), child.DataType)
+		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", "value", v.Type(), dt)
 	default:
-		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", child.Name, v.Type(), child.DataType)
+		return fmt.Errorf("type mismatch for '%s': Go type %s is not compatible with ADS type %s", "value", v.Type(), dt)
 	}
 
 	return nil
 }
 
-// decodeTimeValue decodes a binary time value to time.Time
 func decodeTimeValue(v reflect.Value, buf []byte, dt string) error {
 	switch dt {
 	case "TOD", "TIME_OF_DAY":
 		ms := binary.LittleEndian.Uint32(buf)
-		t := time.Unix(0, int64(ms)*int64(time.Millisecond)-int64(time.Hour))
+		t := time.Unix(0, int64(ms)*int64(time.Millisecond)).UTC()
 		v.Set(reflect.ValueOf(t))
 	case "DATE":
 		sec := binary.LittleEndian.Uint32(buf)

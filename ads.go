@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log/slog"
 	"reflect"
 	"time"
 )
@@ -35,33 +34,80 @@ func (conn *Connection) fetchMetadata() (map[string]SymbolUploadDataType, map[st
 }
 
 func (conn *Connection) GetSymbol(symbolName string) (*Symbol, error) {
-	if err := conn.ensureConnected(); err != nil {
+	if err := conn.beginOperation(); err != nil {
 		return nil, err
 	}
+	defer conn.endOperation()
+	return conn.lookupSymbol(symbolName, true)
+}
 
+// Acquisition does not hold the notification/metadata mutex over network I/O.
+type handleAcquisition struct {
+	done   chan struct{}
+	symbol *Symbol
+	err    error
+}
+
+func cloneSymbol(symbol *Symbol) *Symbol {
+	symbolCacheLock.Lock()
+	defer symbolCacheLock.Unlock()
+	copy := *symbol
+	return &copy
+}
+func (conn *Connection) lookupSymbol(name string, internal bool) (*Symbol, error) {
+	conn.symbolLock.Lock()
+	symbol, ok := conn.symbols[name]
+	if !ok {
+		conn.symbolLock.Unlock()
+		return nil, fmt.Errorf("symbol %s does not exist", name)
+	}
+	if symbol.Handle != 0 {
+		copy := cloneSymbol(symbol)
+		conn.symbolLock.Unlock()
+		return copy, nil
+	}
+	if conn.acquisitions == nil {
+		conn.acquisitions = make(map[string]*handleAcquisition)
+	}
+	if pending := conn.acquisitions[name]; pending != nil {
+		conn.symbolLock.Unlock()
+		select {
+		case <-pending.done:
+			return pending.symbol, pending.err
+		case <-conn.ctx.Done():
+			return nil, conn.ctx.Err()
+		}
+	}
+	pending := &handleAcquisition{done: make(chan struct{})}
+	conn.acquisitions[name] = pending
+	copy := cloneSymbol(symbol)
+	conn.symbolLock.Unlock()
+	resp, err := conn.writeRead(uint32(GroupSymbolHandleByName), 0, 4, append([]byte(name), 0), internal)
+	if err == nil {
+		copy.Handle = binary.LittleEndian.Uint32(resp)
+		if copy.Handle == 0 {
+			err = fmt.Errorf("server returned zero symbol handle")
+		}
+	}
+	conn.symbolLock.Lock()
+	if err == nil {
+		conn.symbols[name] = copy
+		pending.symbol = copy
+	}
+	pending.err = err
+	delete(conn.acquisitions, name)
+	close(pending.done)
+	conn.symbolLock.Unlock()
+	return pending.symbol, err
+}
+func (conn *Connection) datatypeSnapshot() map[string]SymbolUploadDataType {
 	conn.symbolLock.Lock()
 	defer conn.symbolLock.Unlock()
-	localSymbol, ok := conn.symbols[symbolName]
-	if ok {
-		if localSymbol.Handle == 0 {
-			// Get handle by name inline
-			resp, err := conn.WriteRead(uint32(GroupSymbolHandleByName), 0, 4, []byte(symbolName))
-			if err != nil {
-				slog.Error("error getting handle by name", "error", err, "symbol name", symbolName)
-				return nil, err
-			}
-			localSymbol.Handle = binary.LittleEndian.Uint32(resp)
-		}
-		slog.Debug("symbol got", "symbol", localSymbol)
-		return localSymbol, nil
-	}
-	err := fmt.Errorf("symbol does not exist")
-	slog.Error("error getting symbol", "error", err, "symbol name", symbolName)
-	return nil, err
+	return conn.datatypes
 }
 
 func (conn *Connection) getSymbolUploadInfo() (uploadInfo SymbolUploadInfo, err error) {
-	res, err := conn.Read(uint32(GroupSymbolUploadInfo2), 0, 24) //UploadSymbolInfo;
+	res, err := conn.read(uint32(GroupSymbolUploadInfo2), 0, 24, true) //UploadSymbolInfo;
 	if err != nil {
 		return uploadInfo, fmt.Errorf("failed to get symbol upload info: %w", err)
 	}
@@ -74,7 +120,7 @@ func (conn *Connection) getSymbolUploadInfo() (uploadInfo SymbolUploadInfo, err 
 }
 
 func (conn *Connection) getUploadSymbolInfoSymbols(length uint32) (data []byte, err error) {
-	res, err := conn.Read(uint32(GroupSymbolUpload), 0, length) //UploadSymbolInfo;
+	res, err := conn.read(uint32(GroupSymbolUpload), 0, length, true) //UploadSymbolInfo;
 	if err != nil {
 		return nil, fmt.Errorf("failed to get symbol info symbols: %w", err)
 	}
@@ -82,10 +128,10 @@ func (conn *Connection) getUploadSymbolInfoSymbols(length uint32) (data []byte, 
 }
 
 func (conn *Connection) getUploadSymbolInfoDataTypes(length uint32) (data []byte, err error) {
-	data, err = conn.Read(
+	data, err = conn.read(
 		uint32(GroupSymbolDataTypeUpload),
 		0x0,
-		length)
+		length, true)
 	if err != nil {
 		return nil, fmt.Errorf("error doing DT UPLOAD %d", err)
 	}
@@ -108,44 +154,30 @@ func parseNotificationTimestamp(timestamp uint64) time.Time {
 
 // createNotificationCallback creates a callback function that decodes notification data
 // and sends it to the provided channel. This makes the notification flow explicit.
-func createNotificationCallback[T any](symbol *Symbol, datatypes map[string]SymbolUploadDataType, updateChan chan<- Update[T]) NotificationCallback {
+func createNotificationCallback[T any](symbol *Symbol, types map[string]SymbolUploadDataType, updates chan<- Update[T]) NotificationCallback {
+	plan, err := codecFor(reflect.TypeFor[T](), symbol, types)
+	if err != nil {
+		return func(context.Context, uint64, []byte) error { return err }
+	}
+	return notificationCallback(symbol, plan, updates)
+}
+func notificationCallback[T any](symbol *Symbol, plan *codecNode, updates chan<- Update[T]) NotificationCallback {
 	return func(ctx context.Context, timestamp uint64, content []byte) error {
-		notificationTime := parseNotificationTimestamp(timestamp)
-
-		var value T
-		val := reflect.ValueOf(&value).Elem()
-
-		// Decode based on kind
-		switch val.Kind() {
-		case reflect.Struct:
-			if err := decodeStructValue(val, symbol, content, datatypes); err != nil {
-				slog.Error("Failed to decode struct notification", "symbol", symbol.FullName, "error", err)
-				return err
-			}
-		case reflect.Array:
-			if err := decodeArrayField(val, symbol, content, datatypes); err != nil {
-				slog.Error("Failed to decode array notification", "symbol", symbol.FullName, "error", err)
-				return err
-			}
-		default:
-			if err := decodePrimitiveField(val, symbol, content, datatypes); err != nil {
-				slog.Error("Failed to decode primitive notification", "symbol", symbol.FullName, "error", err)
-				return err
-			}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-
-		// Send to channel with context cancellation support
+		if len(content) != plan.size {
+			return fmt.Errorf("notification length mismatch for %s", symbol.FullName)
+		}
+		var value T
+		if err := plan.decode(reflect.ValueOf(&value).Elem(), content); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case updateChan <- Update[T]{
-			Variable:  symbol.FullName,
-			Value:     value,
-			TimeStamp: notificationTime,
-		}:
-			slog.Debug("Successfully delivered notification", "symbol", symbol.FullName)
+		case updates <- Update[T]{Variable: symbol.FullName, Value: value, TimeStamp: parseNotificationTimestamp(timestamp)}:
+			return nil
 		}
-
-		return nil
 	}
 }

@@ -9,8 +9,12 @@ import (
 
 // Write - ADS command id: 3
 func (conn *Connection) Write(group uint32, offset uint32, data []byte) error {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
+	return conn.write(group, offset, data, false)
+}
+func (conn *Connection) write(group, offset uint32, data []byte, internal bool) error {
+	if uint64(len(data))+44 > uint64(conn.frameLimit()) {
+		return fmt.Errorf("write exceeds frame limit")
+	}
 	type writeCommandPacket struct {
 		Group  uint32
 		Offset uint32
@@ -35,7 +39,7 @@ func (conn *Connection) Write(group uint32, offset uint32, data []byte) error {
 	}
 
 	// Try to send the request
-	resp, err := conn.sendRequest(CommandIDWrite, request.Bytes())
+	resp, err := conn.request(CommandIDWrite, request.Bytes(), internal)
 	if err != nil {
 		slog.Error("error during send request for write", "error", err)
 		return fmt.Errorf("write request failed: %w", err)

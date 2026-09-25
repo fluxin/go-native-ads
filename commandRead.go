@@ -8,8 +8,12 @@ import (
 )
 
 func (conn *Connection) Read(group uint32, offset uint32, length uint32) (data []byte, err error) {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
+	return conn.read(group, offset, length, false)
+}
+func (conn *Connection) read(group, offset, length uint32, internal bool) (data []byte, err error) {
+	if uint64(length)+40 > uint64(conn.frameLimit()) {
+		return nil, fmt.Errorf("read exceeds frame limit")
+	}
 	request := bytes.NewBuffer([]byte{})
 	type readCommandPacket struct {
 		Group  uint32
@@ -33,7 +37,7 @@ func (conn *Connection) Read(group uint32, offset uint32, length uint32) (data [
 	}
 
 	// Try to send the request
-	resp, err := conn.sendRequest(CommandIDRead, request.Bytes())
+	resp, err := conn.request(CommandIDRead, request.Bytes(), internal)
 	if err != nil {
 		slog.Error("send request failed", "error", err)
 		return nil, fmt.Errorf("read request failed: %w", err)

@@ -37,7 +37,7 @@ func TestEncodeFieldArrayInStructUsesRelativeElementOffsets(t *testing.T) {
 	arrayChild := &Symbol{
 		Name:   "test_array_st",
 		Offset: 8,
-		Length: 24,
+		Length: 6,
 		Children: map[string]*Symbol{
 			"[0]": {Name: "[0]", DataType: "INT", Offset: 0, Length: 2},
 			"[1]": {Name: "[1]", DataType: "INT", Offset: 2, Length: 2},

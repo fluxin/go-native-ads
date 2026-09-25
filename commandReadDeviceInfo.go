@@ -18,8 +18,6 @@ type DeviceInfo struct {
 }
 
 func (conn *Connection) ReadDeviceInfo() (response DeviceInfo, err error) {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
 	// Try to send the request
 	resp, err := conn.sendRequest(CommandIDReadDeviceInfo, []byte{})
 	if err != nil {

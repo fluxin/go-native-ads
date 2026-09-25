@@ -36,11 +36,11 @@ func parseSumReadResponse(commands []sumReadSubCommand, resp []byte) ([]sumReadS
 
 	for i, cmd := range commands {
 		end := offset + int(cmd.Length)
-		chunk := payload[offset:end]
+		chunk := payload[offset:end:end]
 		offset = end
 		if results[i].Error == ReturnCodeNoErrors {
 			results[i].Length = cmd.Length
-			results[i].Data = append([]byte(nil), chunk...)
+			results[i].Data = chunk
 		}
 	}
 
@@ -48,35 +48,43 @@ func parseSumReadResponse(commands []sumReadSubCommand, resp []byte) ([]sumReadS
 }
 
 // sumReadSubCommand represents a single read operation in a sum command
-type sumReadSubCommand struct {
+type SumReadCommand struct {
 	Group  uint32
 	Offset uint32
 	Length uint32
 }
 
 // sumReadSubResult represents the result of a single read operation
-type sumReadSubResult struct {
+type SumReadResult struct {
 	Error  ReturnCode
 	Length uint32
-	Data   []byte
+	// Data is a capacity-limited view into the response. Clone it to retain only this field.
+	Data []byte
 }
 
-func (conn *Connection) SumRead(commands []sumReadSubCommand) ([]sumReadSubResult, error) {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
+func (conn *Connection) SumRead(commands []SumReadCommand) ([]SumReadResult, error) {
+	return conn.sumRead(commands, false)
+}
+func (conn *Connection) sumRead(commands []sumReadSubCommand, internal bool) ([]sumReadSubResult, error) {
 
 	const maxCommands = 500
+	if len(commands) == 0 {
+		return nil, fmt.Errorf("empty sum request")
+	}
 	if len(commands) > maxCommands {
 		return nil, fmt.Errorf("batch size %d exceeds maximum %d", len(commands), maxCommands)
 	}
 
 	// Calculate total data length
-	totalLength := uint32(0)
+	totalLength := uint64(0)
 	for _, cmd := range commands {
-		totalLength += cmd.Length
+		totalLength += uint64(cmd.Length)
 	}
 
-	request := bytes.NewBuffer([]byte{})
+	if totalLength+uint64(len(commands)*4)+40 > uint64(conn.frameLimit()) {
+		return nil, fmt.Errorf("sum response exceeds frame limit")
+	}
+	request := bytes.NewBuffer(make([]byte, 0, 16+12*len(commands)))
 	type sumReadHeader struct {
 		IndexGroup  uint32
 		IndexOffset uint32
@@ -87,7 +95,7 @@ func (conn *Connection) SumRead(commands []sumReadSubCommand) ([]sumReadSubResul
 	header := sumReadHeader{
 		IndexGroup:  uint32(GroupSumupRead),
 		IndexOffset: uint32(len(commands)),
-		ReadLength:  uint32(len(commands)*4) + totalLength,
+		ReadLength:  uint32(len(commands)*4) + uint32(totalLength),
 		WriteLength: uint32(len(commands) * 12),
 	}
 
@@ -110,7 +118,7 @@ func (conn *Connection) SumRead(commands []sumReadSubCommand) ([]sumReadSubResul
 	}
 
 	// Send the request (SumRead is actually a ReadWrite command)
-	resp, err := conn.sendRequest(CommandIDReadWrite, request.Bytes())
+	resp, err := conn.request(CommandIDReadWrite, request.Bytes(), internal)
 	if err != nil {
 		slog.Error("sum read request failed", "error", err)
 		return nil, fmt.Errorf("sum read request failed: %w", err)
@@ -127,3 +135,7 @@ func (conn *Connection) SumRead(commands []sumReadSubCommand) ([]sumReadSubResul
 	}
 	return results, nil
 }
+
+type sumReadSubCommand = SumReadCommand
+
+type sumReadSubResult = SumReadResult

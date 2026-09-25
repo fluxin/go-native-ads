@@ -84,3 +84,18 @@ func TestParseSumWriteResponse(t *testing.T) {
 		t.Fatalf("unexpected errors: %+v", results)
 	}
 }
+
+func TestSumReadResultAppendDoesNotOverwriteAdjacentField(t *testing.T) {
+	commands := []sumReadSubCommand{{Length: 2}, {Length: 2}}
+	response := make([]byte, 20)
+	binary.LittleEndian.PutUint32(response[4:], 12)
+	copy(response[16:], []byte{1, 0, 2, 0})
+	results, err := parseSumReadResponse(commands, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended := append(results[0].Data, 9)
+	if extended[2] != 9 || results[1].Data[0] != 2 {
+		t.Fatal("appending a result overwrote its sibling")
+	}
+}

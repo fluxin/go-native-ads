@@ -30,7 +30,7 @@ type (
 	Float64 = float64
 	// Bool represents TwinCAT BOOL
 	Bool = bool
-	// String represents TwinCAT STRING and time types (TIME, TOD, DATE, DT)
+	// String represents TwinCAT STRING.
 	String = string
 )
 

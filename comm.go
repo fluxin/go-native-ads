@@ -2,278 +2,318 @@ package ads
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"sync/atomic"
 	"time"
 )
 
-func (conn *Connection) send(data []byte) (response []byte, err error) {
-	if err := conn.ensureConnected(); err != nil {
-		return nil, err
-	}
+const defaultMaxFrameSize = 16 << 20
 
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
-	atomic.AddUint32(&conn.currentRequest, 1)
-	ctx, cancel := context.WithCancel(conn.ctx)
-	defer cancel()
-	select {
-	case <-ctx.Done():
-		return response, err
-	case conn.sendChannel <- data:
-	}
+type outgoingPacket struct {
+	data    []byte
+	written chan error
+}
 
-	ctx, cancel = context.WithCancel(ctx)
-	defer cancel()
-	select {
-	case <-ctx.Done():
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			err = fmt.Errorf("request aborted, deadline exceeded %w", ctx.Err())
-			slog.Error("sendRequest aborted due to timeout", "error", err)
-		} else {
-			err = fmt.Errorf("request aborted, shutdown initiated %w", ctx.Err())
-			slog.Error("sendRequest aborted due to shutdown", "error", err)
-		}
-		conn.onTransportError(ctx.Err())
-		return nil, err
-	case response = <-conn.systemResponse:
-		return response, nil
+func (packet outgoingPacket) complete(err error) {
+	if packet.written != nil {
+		packet.written <- err
 	}
 }
 
-func (conn *Connection) sendRequest(command CommandID, data []byte) (response []byte, err error) {
+type commandResponse struct {
+	data []byte
+	err  error
+}
+type pendingRequest struct {
+	command  CommandID
+	response chan commandResponse
+}
+type routerResponse struct {
+	command uint16
+	data    []byte
+}
+
+// ProtocolError preserves the error code and the layer that returned it.
+type ProtocolError struct {
+	Operation string
+	Code      ReturnCode
+	AMS       bool
+}
+
+func (e *ProtocolError) Error() string {
+	layer := "ADS"
+	if e.AMS {
+		layer = "AMS"
+	}
+	return fmt.Sprintf("%s error %d in %s", layer, e.Code, e.Operation)
+}
+
+func (conn *Connection) requestTimeout() time.Duration {
+	if conn.timeout > 0 {
+		return conn.timeout
+	}
+	return 4 * time.Second
+}
+func (conn *Connection) frameLimit() uint32 {
+	if conn.maxFrameSize > 0 {
+		return conn.maxFrameSize
+	}
+	return defaultMaxFrameSize
+}
+
+func (conn *Connection) transportSnapshot() (context.Context, chan outgoingPacket, chan routerResponse, error) {
+	conn.transportLock.Lock()
+	defer conn.transportLock.Unlock()
+	if conn.transportCtx == nil || conn.transportCtx.Err() != nil {
+		return nil, nil, nil, net.ErrClosed
+	}
+	return conn.transportCtx, conn.sendChannel, conn.systemResponse, nil
+}
+
+func (conn *Connection) send(data []byte) ([]byte, error) { return conn.sendSystem(data, false) }
+func (conn *Connection) sendSystem(data []byte, internal bool) ([]byte, error) {
+	if !internal {
+		if err := conn.beginOperation(); err != nil {
+			return nil, err
+		}
+		defer conn.endOperation()
+	}
+	if len(data) < 6 {
+		return nil, fmt.Errorf("short system request")
+	}
+	// System frames have no invoke ID. Only one exchange may be in flight.
+	conn.systemLock.Lock()
+	defer conn.systemLock.Unlock()
+	transport, send, responses, err := conn.transportSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(transport, conn.requestTimeout())
+	defer cancel()
+	command := binary.LittleEndian.Uint16(data)
+	var written chan error
+	if command == amsTCPPortClose {
+		written = make(chan error, 1)
+	}
+	select {
+	case send <- outgoingPacket{data: data, written: written}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if written != nil {
+		select {
+		case err := <-written:
+			return nil, err
+		case <-ctx.Done():
+			select {
+			case err := <-written:
+				return nil, err
+			default:
+				return nil, ctx.Err()
+			}
+		}
+	}
+	select {
+	case reply := <-responses:
+		if reply.command != command {
+			conn.failTransport(transport, fmt.Errorf("unexpected system response %#x for %#x", reply.command, command))
+			return nil, fmt.Errorf("unexpected system response command")
+		}
+		return reply.data, nil
+	case <-ctx.Done():
+		// A timed-out uncorrelated reply must never be consumed by the next request.
+		conn.failTransport(transport, ctx.Err())
+		return nil, ctx.Err()
+	}
+}
+
+func (conn *Connection) sendRequest(command CommandID, data []byte) ([]byte, error) {
+	return conn.request(command, data, false)
+}
+func (conn *Connection) request(command CommandID, data []byte, internal bool) ([]byte, error) {
 	if conn == nil {
-		slog.Error("Failed to encode header, connection is nil pointer")
 		return nil, errors.New("connection is nil")
 	}
-	if err := conn.ensureConnected(); err != nil {
-		return nil, err
+	if !internal {
+		if err := conn.beginOperation(); err != nil {
+			return nil, err
+		}
+		defer conn.endOperation()
 	}
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
-	conn.activeRequestLock.Lock()
-	// First, request a new invoke id
-	id := atomic.AddUint32(&conn.currentRequest, 1)
-	// Create a channel for the response
-	responseChan := make(chan []byte)
-	conn.activeRequests[id] = responseChan
-	conn.activeRequestLock.Unlock()
-	slog.Debug("encoding packet", "command", command, "data", data, "id", id)
-
-	pack, err := conn.encode(command, data, id)
+	if uint64(len(data))+32 > uint64(conn.frameLimit()) {
+		return nil, fmt.Errorf("request exceeds frame limit")
+	}
+	transport, send, _, err := conn.transportSnapshot()
 	if err != nil {
-		// Clean up the channel on encoding error
-		conn.activeRequestLock.Lock()
-		delete(conn.activeRequests, id)
-		conn.activeRequestLock.Unlock()
-		slog.Error("Error during sendrequest encode", "error", err)
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(conn.ctx, 4000*time.Millisecond)
+	ctx, cancel := context.WithTimeout(transport, conn.requestTimeout())
 	defer cancel()
-	select {
-	case <-ctx.Done():
-		// Clean up the channel on timeout/shutdown
+	reply := make(chan commandResponse, 1)
+	conn.activeRequestLock.Lock()
+	id := atomic.AddUint32(&conn.currentRequest, 1)
+	for conn.activeRequests[id] != nil {
+		id = atomic.AddUint32(&conn.currentRequest, 1)
+	}
+	conn.activeRequests[id] = &pendingRequest{command: command, response: reply}
+	conn.activeRequestLock.Unlock()
+	defer func() {
 		conn.activeRequestLock.Lock()
 		delete(conn.activeRequests, id)
 		conn.activeRequestLock.Unlock()
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			slog.Error("sendRequest aborted due to timeout")
-		} else {
-			slog.Info("sendRequest aborted due to shutdown")
-		}
-		conn.onTransportError(ctx.Err())
-		return nil, ctx.Err()
-	case conn.sendChannel <- pack:
+	}()
+	packet, err := conn.encode(command, data, id)
+	if err != nil {
+		return nil, err
 	}
 	select {
+	case send <- outgoingPacket{data: packet}:
 	case <-ctx.Done():
-		// Clean up the channel on timeout/shutdown
-		conn.activeRequestLock.Lock()
-		delete(conn.activeRequests, id)
-		conn.activeRequestLock.Unlock()
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			slog.Error("sendRequest aborted due to timeout")
-		} else {
-			slog.Info("sendRequest aborted due to shutdown")
-		}
-		conn.onTransportError(ctx.Err())
 		return nil, ctx.Err()
-	case response = <-responseChan:
-		return response, nil
 	}
+	select {
+	case r := <-reply:
+		return r.data, r.err
+	case <-ctx.Done():
+		select {
+		case r := <-reply:
+			return r.data, r.err
+		default:
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (conn *Connection) failTransport(ctx context.Context, err error) {
+	conn.transportLock.Lock()
+	current := conn.transportCtx
+	conn.transportLock.Unlock()
+	if current != ctx || ctx.Err() != nil {
+		return
+	}
+	conn.onTransportError(err)
 }
 
 func (conn *Connection) listen(ctx context.Context, connection net.Conn) {
 	reader := bufio.NewReader(connection)
+	var header [6]byte
 	for {
-		tcpHeader := amsTCPHeader{}
-		data := make([]byte, 6)
-		select {
-		case <-ctx.Done():
-			slog.Info("exit listen")
+		if _, err := io.ReadFull(reader, header[:]); err != nil {
+			conn.failTransport(ctx, err)
 			return
-		default:
-			_, err := io.ReadFull(reader, data)
-			if err != nil {
-				if ctx.Err() != nil || conn.ctx.Err() != nil {
-					return
-				}
-				slog.Debug("listen loop stopped while reading header", "error", err)
-				conn.onTransportError(err)
-				return
-			}
 		}
-		buf := bytes.NewBuffer(data)
-		err := binary.Read(buf, binary.LittleEndian, &tcpHeader)
-		if err != nil {
-			slog.Error("error during header read", "error", err)
-			continue
-		}
-		data = make([]byte, tcpHeader.Length)
-		select {
-		case <-ctx.Done():
+		length := binary.LittleEndian.Uint32(header[2:])
+		if length > conn.frameLimit() {
+			conn.failTransport(ctx, fmt.Errorf("AMS frame length %d exceeds limit", length))
 			return
-		default:
-			_, err := io.ReadFull(reader, data)
-			if err != nil {
-				if ctx.Err() != nil || conn.ctx.Err() != nil {
-					return
-				}
-				slog.Debug("listen loop stopped while reading payload", "error", err)
-				conn.onTransportError(err)
-				return
-			}
 		}
-		slog.Debug("routing incoming AMS/TCP frame",
-			"system", tcpHeader.System,
-			"length", tcpHeader.Length)
-		if tcpHeader.System > 0 {
-			systemCommand := uint16(tcpHeader.System)<<8 | uint16(tcpHeader.Unknown1)
-			if systemCommand == amsTCPPortRouterNote {
-				if err := conn.handleRouterNote(data); err != nil {
-					slog.Debug("failed to parse router note", "error", err)
-				}
+		data := make([]byte, length)
+		if _, err := io.ReadFull(reader, data); err != nil {
+			conn.failTransport(ctx, err)
+			return
+		}
+		command := binary.LittleEndian.Uint16(header[:2])
+		if command != 0 {
+			if command == amsTCPPortRouterNote {
+				_ = conn.handleRouterNote(data)
 				continue
 			}
-			slog.Debug("routing frame to system response channel",
-				"system", tcpHeader.System,
-				"systemCommand", systemCommand,
-				"length", tcpHeader.Length)
 			select {
-			case conn.systemResponse <- data:
-			case <-time.After(100 * time.Millisecond):
-				slog.Error("system response channel blocked; dropped frame")
-				if len(data) >= 33 {
-					cmd := binary.LittleEndian.Uint16(data[32:34])
-					slog.Error("dropped frame command", "command", cmd)
-				}
+			case conn.systemResponse <- routerResponse{command, data}:
+			case <-ctx.Done():
+				return
+			default:
+				conn.failTransport(ctx, fmt.Errorf("unsolicited system response"))
+				return
 			}
 		} else {
-			slog.Debug("routing frame to ADS handler", "length", tcpHeader.Length)
-			go conn.handleReceive(ctx, data)
+			// Parsing and enqueueing are ordered. User callbacks run on bounded workers.
+			conn.handleReceive(ctx, data)
 		}
 	}
 }
 
 func (conn *Connection) handleReceive(ctx context.Context, data []byte) {
-	slog.Debug("in read")
 	if len(data) < 32 {
-		slog.Error("received frame with short AMS header", "length", len(data))
+		conn.failTransport(ctx, fmt.Errorf("short AMS header"))
 		return
 	}
-	buf := bytes.NewBuffer(data)
-	header := amsHeader{}
-	err := binary.Read(buf, binary.LittleEndian, &header)
-	if err != nil {
-		slog.Error("Error parsing header", "error", err)
+	command := CommandID(binary.LittleEndian.Uint16(data[16:]))
+	length := binary.LittleEndian.Uint32(data[20:])
+	code := binary.LittleEndian.Uint32(data[24:])
+	id := binary.LittleEndian.Uint32(data[28:])
+	if uint64(length) != uint64(len(data)-32) {
+		conn.failTransport(ctx, fmt.Errorf("ADS payload length mismatch"))
 		return
 	}
-	slog.Debug("parsed AMS header",
-		"command", header.Command,
-		"cmdName", commandName(header.Command),
-		"sourceNetID", header.Source.NetID,
-		"sourcePort", header.Source.Port,
-		"targetNetID", header.Target.NetID,
-		"targetPort", header.Target.Port,
-		"invokeID", header.InvokeID,
-		"length", header.Length)
-	slog.Debug("header info", "header", header)
-
-	adsData := data[32:]
-	if len(adsData) != int(header.Length) {
-		slog.Error("ADS payload length mismatch", "expected", header.Length, "actual", len(adsData))
-		return
-	}
-
-	slog.Debug("dispatching ADS command", "command", header.Command, "invokeID", header.InvokeID, "length", header.Length)
-
-	switch header.Command {
-	case CommandIDDeviceNotification:
-		slog.Debug("processing device notification frame")
-		err := conn.deviceNotification(ctx, adsData)
-		if err != nil {
-			slog.Error("failed to process device notification", "error", err)
+	if command == CommandIDDeviceNotification {
+		if code != 0 {
+			return
 		}
+		if err := conn.deviceNotification(ctx, data[32:]); err != nil {
+			conn.failTransport(ctx, err)
+		}
+		return
+	}
+	conn.activeRequestLock.Lock()
+	pending := conn.activeRequests[id]
+	delete(conn.activeRequests, id)
+	conn.activeRequestLock.Unlock()
+	if pending == nil {
+		return
+	}
+	response := commandResponse{data: data[32:]}
+	if code != 0 {
+		response.err = &ProtocolError{Operation: commandName(command), Code: ReturnCode(code), AMS: true}
+	} else if pending.command != command {
+		response.err = fmt.Errorf("unexpected response command %d", command)
+	}
+	// Exactly one completion, never block under the request map mutex.
+	select {
+	case pending.response <- response:
 	default:
-		slog.Debug("default receive")
-		// Check if the response channel exists and is open
-		conn.activeRequestLock.Lock()
-		defer conn.activeRequestLock.Unlock()
-		if response, ok := conn.activeRequests[header.InvokeID]; ok {
-			// Try to send the response to the waiting request function
-			select {
-			case <-ctx.Done():
-				slog.Warn("request context closed before response delivery", "id", header.InvokeID, "command", header.Command)
-				return
-			case response <- adsData:
-				// Delete the map entry after successful send to prevent memory leak
-				delete(conn.activeRequests, header.InvokeID)
-				slog.Debug("Successfully delivered answer", "id", header.InvokeID, "command", header.Command)
-			}
-		} else {
-			slog.Warn("received ADS response with unknown invoke ID", "invokeID", header.InvokeID, "command", header.Command)
-		}
-
 	}
 }
 
 func (conn *Connection) transmitWorker(ctx context.Context, connection net.Conn) {
-	writer := bufio.NewWriter(connection)
+	conn.transportLock.Lock()
+	send := conn.sendChannel
+	conn.transportLock.Unlock()
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Debug("Exit transmitWorker")
 			return
-		case data := <-conn.sendChannel:
+		case packet := <-send:
+			data := packet.data
 			if ctx.Err() != nil {
+				packet.complete(ctx.Err())
 				return
 			}
-			slog.Debug("Sending bytes", "size", len(data))
-			_, err := writer.Write(data)
-			if err != nil {
-				if ctx.Err() != nil || conn.ctx.Err() != nil {
+			if err := connection.SetWriteDeadline(time.Now().Add(conn.requestTimeout())); err != nil {
+				packet.complete(err)
+				conn.failTransport(ctx, err)
+				return
+			}
+			for len(data) > 0 {
+				n, err := connection.Write(data)
+				if err != nil {
+					packet.complete(err)
+					conn.failTransport(ctx, err)
 					return
 				}
-				slog.Error("Error sending data on conn", "error", err)
-				conn.onTransportError(err)
-				return
-			}
-			if err := writer.Flush(); err != nil {
-				if ctx.Err() != nil || conn.ctx.Err() != nil {
+				if n == 0 {
+					packet.complete(io.ErrNoProgress)
+					conn.failTransport(ctx, io.ErrNoProgress)
 					return
 				}
-				slog.Error("Error flushing data on conn", "error", err)
-				conn.onTransportError(err)
-				return
+				data = data[n:]
 			}
+			packet.complete(nil)
 		}
 	}
 }

@@ -42,6 +42,8 @@ func stringToNetID(source string) (netID [6]byte, err error) {
 }
 
 func (conn *Connection) encode(command CommandID, data []byte, invokeID uint32) ([]byte, error) {
+	conn.addressLock.RLock()
+	defer conn.addressLock.RUnlock()
 	slog.Debug("Starting encoding of AMS header",
 		"command", command,
 		"target", conn.target,

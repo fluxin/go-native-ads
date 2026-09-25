@@ -4,6 +4,10 @@ Only open work items are listed here.
 
 ## Immediate TODOs
 
+0. Live validation of hardening
+   - Rerun all PLC smoke checks after transport/codec/codegen changes.
+   - Exercise reconnect, online layout changes, notification overflow/cancellation, and server-side cleanup on real TwinCAT.
+
 1. Route helper expansion
    - Add optional local route helper wrappers (add/delete local route) where protocol support is stable.
    - Add route listing helpers where router APIs are stable.

@@ -52,8 +52,9 @@ type Connection struct {
 	nextSubID              uint64
 	symbolLock             sync.Mutex
 	acquisitions           map[string]*handleAcquisition
+	namedHandles           map[string]uint32
 	restoreLock            sync.Mutex
-	generationLock         sync.RWMutex
+	generationLock         generationMutex
 	backgroundGroup        sync.WaitGroup
 	closeOnce              sync.Once
 	unknownCleanup         map[uint32]bool
@@ -401,11 +402,9 @@ func (conn *Connection) closeTransport() {
 	for handle := range conn.activeNotifications {
 		notifications = append(notifications, handle)
 	}
-	handles := make([]uint32, 0)
-	for _, symbol := range conn.symbols {
-		if symbol.Handle != 0 {
-			handles = append(handles, symbol.Handle)
-		}
+	handles := make([]uint32, 0, len(conn.namedHandles))
+	for _, handle := range conn.namedHandles {
+		handles = append(handles, handle)
 	}
 	conn.symbolLock.Unlock()
 	for _, handle := range notifications {

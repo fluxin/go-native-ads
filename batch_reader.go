@@ -6,17 +6,6 @@ import (
 	"sync"
 )
 
-type handleInfo struct {
-	conn       *Connection
-	handle     uint32
-	length     uint32
-	dataType   string
-	symbolName string
-	bindEpoch  uint64
-	symbol     *Symbol
-	typ        reflect.Type
-	codec      *codecNode
-}
 type fieldInfo struct {
 	name  string
 	index []int
@@ -30,47 +19,25 @@ type HandleInfoGetter interface {
 	Connection() *Connection
 }
 
-func extractHandleInfo(h any) (handleInfo, error) {
-	getter, ok := h.(HandleInfoGetter)
+func extractHandleInfo(h any) (symbolBinding, error) {
+	getter, ok := h.(interface {
+		Connection() *Connection
+		SymbolName() string
+	})
 	if !ok || (reflect.ValueOf(h).Kind() == reflect.Pointer && reflect.ValueOf(h).IsNil()) {
-		return handleInfo{}, fmt.Errorf("expected nonnil typed handle")
+		return symbolBinding{}, fmt.Errorf("expected nonnil typed handle")
 	}
 	if getter.Connection() == nil {
-		return handleInfo{}, fmt.Errorf("handle has no connection")
+		return symbolBinding{}, fmt.Errorf("handle has no connection")
 	}
 	// Copy identity only. A numeric handle is meaningful only with its actual binding epoch.
-	return handleInfo{conn: getter.Connection(), symbolName: getter.SymbolName()}, nil
-}
-func ensureHandleInfoBound(info *handleInfo) error {
-	epoch := info.conn.CurrentEpoch()
-	if info.bindEpoch == epoch && info.handle != 0 && (info.typ == nil || info.codec != nil) {
-		return nil
-	}
-	symbol, err := info.conn.lookupSymbol(info.symbolName, true)
-	if err != nil {
-		return err
-	}
-	var plan *codecNode
-	if info.typ != nil {
-		plan, err = codecFor(info.typ, symbol, info.conn.datatypeSnapshot())
-		if err != nil {
-			return err
-		}
-	}
-	info.handle = symbol.Handle
-	info.length = symbol.Length
-	info.dataType = symbol.DataType
-	info.bindEpoch = epoch
-	info.symbol = symbol
-	info.codec = plan
-	return nil
+	return symbolBinding{conn: getter.Connection(), symbolName: getter.SymbolName()}, nil
 }
 func getAllFieldInfo(t reflect.Type) []fieldInfo {
 	var fields []fieldInfo
 	collectFieldInfo(t, nil, &fields)
 	return fields
 }
-func countLeafFields(t reflect.Type) int { return len(getAllFieldInfo(t)) }
 func collectFieldInfo(t reflect.Type, prefix []int, fields *[]fieldInfo) {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
@@ -82,7 +49,7 @@ func collectFieldInfo(t reflect.Type, prefix []int, fields *[]fieldInfo) {
 		}
 	}
 }
-func buildBatch(conn *Connection, t reflect.Type, handles []any) ([]handleInfo, []fieldInfo, error) {
+func buildBatch(conn *Connection, t reflect.Type, handles []any) ([]symbolBinding, []fieldInfo, error) {
 	if t.Kind() != reflect.Struct || isTimeType(t) {
 		return nil, nil, fmt.Errorf("batch type must be a struct")
 	}
@@ -90,7 +57,7 @@ func buildBatch(conn *Connection, t reflect.Type, handles []any) ([]handleInfo, 
 	if len(handles) == 0 || len(handles) > 500 || len(handles) != len(fields) {
 		return nil, nil, fmt.Errorf("batch requires 1..500 handles matching %d fields", len(fields))
 	}
-	infos := make([]handleInfo, len(handles))
+	infos := make([]symbolBinding, len(handles))
 	for i, h := range handles {
 		info, err := extractHandleInfo(h)
 		if err != nil {
@@ -108,7 +75,7 @@ func buildBatch(conn *Connection, t reflect.Type, handles []any) ([]handleInfo, 
 			f = sf.Type
 		}
 		info.typ = fields[i].typ
-		if err := ensureHandleInfoBound(&info); err != nil {
+		if err := info.bind(); err != nil {
 			return nil, nil, fmt.Errorf("field %s: %w", fields[i].name, err)
 		}
 		infos[i] = info
@@ -116,13 +83,26 @@ func buildBatch(conn *Connection, t reflect.Type, handles []any) ([]handleInfo, 
 	return infos, fields, nil
 }
 
+type batchPlan struct {
+	conn    *Connection
+	handles []symbolBinding
+	fields  []fieldInfo
+}
+
+func (p *batchPlan) bind() error {
+	for i := range p.handles {
+		if err := p.handles[i].bind(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // BatchReader reads fields in one ADS sum request. Concurrent calls are serialized.
 type BatchReader[T any] struct {
-	conn     *Connection
+	batchPlan
 	mu       sync.Mutex
-	handles  []handleInfo
 	commands []sumReadSubCommand
-	fields   []fieldInfo
 }
 
 func NewBatchReader[T any](conn *Connection, handles ...any) (*BatchReader[T], error) {
@@ -137,7 +117,7 @@ func NewBatchReader[T any](conn *Connection, handles ...any) (*BatchReader[T], e
 	if err != nil {
 		return nil, err
 	}
-	return &BatchReader[T]{conn: conn, handles: infos, fields: fields, commands: make([]sumReadSubCommand, len(infos))}, nil
+	return &BatchReader[T]{batchPlan: batchPlan{conn: conn, handles: infos, fields: fields}, commands: make([]sumReadSubCommand, len(infos))}, nil
 }
 
 // Read replaces target only if every field succeeds; it does not promise a PLC scan snapshot.
@@ -151,10 +131,10 @@ func (br *BatchReader[T]) Read(target *T) error {
 		return err
 	}
 	defer br.conn.endOperation()
+	if err := br.batchPlan.bind(); err != nil {
+		return err
+	}
 	for i := range br.handles {
-		if err := ensureHandleInfoBound(&br.handles[i]); err != nil {
-			return err
-		}
 		h := br.handles[i]
 		br.commands[i] = sumReadSubCommand{Group: uint32(GroupSymbolValueByHandle), Offset: h.handle, Length: h.length}
 	}

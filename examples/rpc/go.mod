@@ -1,0 +1,7 @@
+module rpcsmoke
+
+go 1.27
+
+require github.com/fluxin/go-native-ads v0.1.0
+
+replace github.com/fluxin/go-native-ads => ../../

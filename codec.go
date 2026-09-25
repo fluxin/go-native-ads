@@ -36,6 +36,7 @@ func cacheFor(symbol *Symbol) *symbolCache {
 }
 
 type codecNode struct {
+	record   bool
 	typ      reflect.Type
 	dt       string
 	offset   int
@@ -67,7 +68,8 @@ func compileCodec(t reflect.Type, s *Symbol, types map[string]SymbolUploadDataTy
 	mismatch := func() (*codecNode, error) {
 		return nil, fmt.Errorf("type mismatch for %s: Go %s vs ADS %s (%d bytes)", s.FullName, t, s.DataType, s.Length)
 	}
-	if len(s.Children) > 0 {
+	if len(s.Children) > 0 || s.DataType == rpcRecordType {
+		node.record = true
 		if isArraySymbol(s) {
 			if t.Kind() != reflect.Array && t.Kind() != reflect.Slice {
 				return mismatch()
@@ -177,7 +179,7 @@ func (node *codecNode) encode(v reflect.Value, data []byte) error {
 	if len(data) < node.size {
 		return fmt.Errorf("short encode buffer: need %d got %d", node.size, len(data))
 	}
-	if len(node.children) == 0 {
+	if !node.record {
 		return encodePrimitive(v, data[:node.size], node.dt)
 	}
 	if v.Kind() == reflect.Slice && v.Len() != len(node.children) {
@@ -203,7 +205,7 @@ func (node *codecNode) decode(v reflect.Value, data []byte) error {
 	if !v.CanSet() {
 		return fmt.Errorf("decode destination is not settable")
 	}
-	if len(node.children) == 0 {
+	if !node.record {
 		return decodePrimitive(v, data[:node.size], node.dt)
 	}
 	if v.Kind() == reflect.Slice {

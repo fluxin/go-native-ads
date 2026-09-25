@@ -1,13 +1,13 @@
 # go-native-ads
 
-Pure-Go TwinCAT ADS client ([github.com/fluxin/go-native-ads](https://github.com/fluxin/go-native-ads)). Requires Go 1.26 or newer.
+Pure-Go TwinCAT ADS client ([github.com/fluxin/go-native-ads](https://github.com/fluxin/go-native-ads)). The development branch requires Go 1.27 or newer.
 based on my original implementation and cleaned up for modern golang. Generics and handle IO added by myself, codegen, docs, tests, and additional features thankfully supported by AI.
 
 ## Current status
 
-Current release: **v0.1.0**. See [CHANGELOG.md](CHANGELOG.md) for migration and compatibility notes, [PERFORMANCE.md](PERFORMANCE.md) for measured CPU improvements, and [PLAN.md](PLAN.md) for remaining work.
+Current published release: **v0.1.0** (Go 1.26). The working tree targets **v0.2.0** (Go 1.27) with typed RPC and generated clients. See [CHANGELOG.md](CHANGELOG.md) for migration and compatibility notes, [PERFORMANCE.md](PERFORMANCE.md) for measured CPU improvements, and [PLAN.md](PLAN.md) for remaining work.
 
-- Core behavior is implemented: connect, typed handle read/write, batch read/write (sum commands), notifications, symbol/type upload, and code generation.
+- Core behavior is implemented: connect, typed handle read/write, batch read/write (sum commands), notifications, symbol/type upload, fixed-layout RPC invocation, and code generation.
 - Recent protocol/correctness fixes are in place for notification timing, sum parsing, command response validation, and array metadata handling.
 - Reconnect and subscription restoration foundations are implemented: policy-driven lifecycle hooks, reconnect loop, epoch-based handle rebinding, and subscription replay.
 - Symbol-version change detection and metadata/subscription refresh are implemented via `GroupSymbolVersion` monitoring.
@@ -34,6 +34,8 @@ Replace `codeberg.org/fluxin/go-native-ads` imports with `github.com/fluxin/go-n
 
 The GitHub history includes the original `v0.0.1`–`v0.0.6` tags unchanged; those versions still declare the Codeberg module path. **v0.1.0 is the first release using the GitHub module path.**
 
+The install command selects the published v0.1.0 release. RPC and the connection-level generic methods below are v0.2.0 development APIs; use this checkout and the examples' local replacements until that release is published.
+
 ## API snapshot
 
 ```go
@@ -49,14 +51,14 @@ conn, err := ads.NewConnection(ctx, ads.ConnectionOptions{
 err = conn.Connect()
 defer conn.Close()
 
-h, err := ads.GetHandle[ads.Int16](conn, "MAIN.counter")
+h, err := conn.GetHandle[int16]("MAIN.counter")
 v, err := h.Read()
 err = h.Write(42)
 
-reader, err := ads.NewBatchReader[MyStruct](conn, h1, h2, h3)
+reader, err := conn.NewBatchReader[MyStruct](h1, h2, h3)
 err = reader.Read(&out)
 
-writer, err := ads.NewBatchWriter[MyStruct](conn, h1, h2, h3)
+writer, err := conn.NewBatchWriter[MyStruct](h1, h2, h3)
 err = writer.Write(in)
 
 updates := make(chan ads.Update[ads.Int16], 10)
@@ -82,7 +84,7 @@ ok, err := ads.AddRouteToPLC(ctx, ads.AddRouteToPLCRequest{
     Password:       "secret",
 })
 netID, err := ads.DiscoverNetID(ctx, "192.168.0.10")
-info, err := ads.DiscoverNetIDInfo(ctx, "192.168.0.10")
+routeInfo, err := ads.DiscoverNetIDInfo(ctx, "192.168.0.10")
 
 // Router diagnostics/introspection helpers
 router := conn.Router()
@@ -94,6 +96,8 @@ stateValue, stateKnown, stateUpdated := router.StateSnapshot()
 assigned, err := router.RegisterPort(0)
 err = router.UnregisterPort(assigned.Port)
 ```
+
+These are API fragments; handle each error before using its result. The original package-level `GetHandle`, `NewBatchReader`, and `NewBatchWriter` functions remain supported.
 
 ## Connection transport
 
@@ -118,16 +122,45 @@ err = router.UnregisterPort(assigned.Port)
 
 ## Code generation
 
-The CLI emits formatted standalone Go files with required imports, inline nested struct definitions, multidimensional arrays, enums, and aliases for time types. Identifier collisions are rejected. Clone the release and run the CLI from its own module against a reachable PLC. Replace the output path with a file inside your application:
+The CLI emits formatted standalone Go files with required imports, inline nested struct definitions, multidimensional arrays, enums, and aliases for time types. Identifier collisions are rejected. Run the CLI from its own module in this checkout against a reachable PLC. Replace the output path with a file inside your application:
 
 ```bash
-git clone --branch v0.1.0 https://github.com/fluxin/go-native-ads.git
-cd go-native-ads/cmd/codegen
+cd cmd/codegen
 go run . -ip=192.168.1.100 -netid=192.168.1.100.1.1 \
   -symbols=MAIN.counter,MAIN.values -o=/path/to/your/app/generated_types.go -pkg=plc
 ```
 
 The CLI targets PLC runtime port 851. Its `-port` flag changes the AMS router TCP port (default 48898). Generated ADS imports use the GitHub module path. The CLI and examples have local `replace` directives so checkout builds use the matching root source.
+
+## RPC and generated clients
+
+RPC methods must have the PLC attribute `{attribute 'TcRpcEnable'}`. Generate typed clients from function-block instances:
+
+```bash
+(cd cmd/codegen && go run . -ip=<PLC_IP> -netid=<PLC_NETID> \
+  -rpc=MAIN.rpc=RPCClient -pkg=main -o=/path/to/your/app/generated.go)
+```
+
+The generated constructor validates method signatures. Calls use ordinary Go methods:
+
+```go
+client, err := NewRPCClient(conn, "MAIN.rpc")
+if err != nil { return err }
+result, err := client.Add(ctx, RPCClientAddInput{A: 7, B: 5})
+if err != nil { return err }
+fmt.Println(result.ReturnValue)
+```
+
+For handwritten typed bindings, use `conn.BindRPC[Input, Result](instance, method)` and `binding.Call(ctx, input)`. Input/output structs use `ads` tags matching PLC parameter names; the return value uses `ads:"$return"`. Empty records use `struct{}`. Generated void methods return only `error`, and methods without inputs omit the input argument.
+
+- Supported fixed values use the shared codec: primitives, STRING, time values, enums, nested structures and fixed arrays where metadata describes their complete layout. Fixed IN|OUT parameters appear in both records.
+- Pointer/reference flags, length-linked buffers, RPC array-dimension flags, custom packing and unknown signatures return `UnsupportedRPCError`. In particular, a PLC INOUT declaration uploaded with by-reference flags is rejected in this first version.
+- Parameter values are concatenated in declaration order; the response begins with the return value, followed by outputs. Internal struct offsets come from PLC metadata, never Go memory alignment.
+- The connection owns and deduplicates method handles. Reconnects and symbol-version changes invalidate bindings; generated signatures include nested layouts and enum values. Incompatible changes return `ErrRPCSignatureChanged` before invocation. Comments and method-table placement do not affect signatures.
+- `Call` observes its context while waiting for a connection generation, handle acquisition and response. `RequestTimeout` also bounds the call. Cancellation cannot undo PLC execution; calls are never automatically retried and a failed decode returns no partial result.
+- `RPCMethods` exposes immutable discovery metadata. `GenerateRPCClient` / `GenerateRPCClients` emit client declarations, and `FormatGeneratedCode` produces a standalone source file. Multiple clients in one generation share dependent type declarations.
+
+See [examples/rpc](examples/rpc/README.md) for PLC fixture declarations and the generated smoke harness. Offline socket/codegen tests pass; live TwinCAT ABI, reconnect and online-change validation remains open.
 
 ## Verified behavior
 
@@ -169,8 +202,10 @@ go vet ./...
 (cd cmd/codegen && go test ./... && go vet ./...)
 (cd examples/simple && go test ./... && go vet ./...)
 (cd examples/add_route && go test ./... && go vet ./...)
+(cd examples/rpc && go test ./... && go vet ./...)
 go test -run='^$' -bench=BenchmarkReview -benchmem
 go test -run='^$' -fuzz=FuzzDatatypeUpload -fuzztime=10s
+go test -run='^$' -fuzz=FuzzRPCMetadata -fuzztime=10s
 ```
 
 Run these commands from the repository root. The root module does not include the nested CLI/example modules in its `./...` traversal. Root tests use local TCP/Unix sockets; they do not contact a PLC. See [PERFORMANCE.md](PERFORMANCE.md) for benchmark scope and recorded results.
@@ -199,7 +234,7 @@ Credentialed route-helper smoke test:
 - No automated live PLC CI in this repo; offline tests use a local fake AMS router.
 - Sum commands are capped at 500 subcommands and the configured frame size.
 - Notification overflow drops new samples and must be monitored by applications requiring loss detection.
-- RPC invoke support remains deferred.
+- RPC is currently validated offline with synthetic metadata. Live captured fixtures and real TwinCAT validation remain open; pointer/reference marshalling is deferred.
 
 ## License
 

@@ -76,7 +76,10 @@ func TestParseEnumMembersFromDatatypeTailWithAttributes(t *testing.T) {
 	buf.WriteByte(0)
 	_ = binary.Write(buf, binary.LittleEndian, int16(1))
 
-	members, err := parseEnumMembersFromDatatypeTail(buf, datatypeFlagAttributes|datatypeFlagEnumInfos, 2, "INT")
+	dt := SymbolUploadDataType{DatatypeEntry: datatypeEntry{Flags: datatypeFlagAttributes | datatypeFlagEnumInfos, Size: 2}, DataType: "INT"}
+	budget := maxMetadataNodes
+	err := parseDatatypeTail(buf, &dt, &budget)
+	members := dt.EnumMembers
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}

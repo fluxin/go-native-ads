@@ -25,7 +25,7 @@ func TestGeneratedFileCompiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Clean(filepath.Join(cwd, "../.."))
-	module := "module generated\n\ngo 1.26\nrequire github.com/fluxin/go-native-ads v0.1.0\nreplace github.com/fluxin/go-native-ads => " + filepath.ToSlash(root) + "\n"
+	module := "module generated\n\ngo 1.27\nrequire github.com/fluxin/go-native-ads v0.1.0\nreplace github.com/fluxin/go-native-ads => " + filepath.ToSlash(root) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -62,5 +62,17 @@ func TestGenerateGoCodeDeterministic(t *testing.T) {
 	}
 	if !strings.Contains(a, "import ads") || !strings.Contains(a, "import time") {
 		t.Fatal(a)
+	}
+}
+
+func TestParseRPCClients(t *testing.T) {
+	clients, err := parseRPCClients(" MAIN.axis=Axis, MAIN.motor = Motor ")
+	if err != nil || clients["MAIN.axis"] != "Axis" || clients["MAIN.motor"] != "Motor" {
+		t.Fatalf("%v %v", clients, err)
+	}
+	for _, bad := range []string{"MAIN.axis", "=Axis", "MAIN.axis=", "MAIN.axis=Axis,MAIN.axis=Other"} {
+		if _, err := parseRPCClients(bad); err == nil {
+			t.Fatal("accepted", bad)
+		}
 	}
 }

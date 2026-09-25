@@ -7,7 +7,7 @@
 ## Repository and release
 
 - Canonical repository/module: `github.com/fluxin/go-native-ads`.
-- Current release: `v0.1.0`; Go 1.26 or newer. See `CHANGELOG.md` for compatibility changes.
+- Published release: `v0.1.0` (Go 1.26); development target: `v0.2.0` (Go 1.27). See `CHANGELOG.md` for compatibility changes.
 - Historical `v0.0.1`–`v0.0.6` tags retain the Codeberg module path; do not retag or rewrite them.
 - The CLI and examples are separate modules with local replacements. Test/vet each module as shown in `README.md`; root `./...` does not cover them.
 
@@ -40,7 +40,7 @@ ads.ConnectionTransportUnix
 (RouterClient).RegisterPort(requestedPort uint16) (AmsAddress, error)
 (RouterClient).UnregisterPort(port uint16) error
 
-ads.GetHandle[T](conn, symbolName) (*Handle[T], error)
+(*Connection).GetHandle[T](symbolName) (*Handle[T], error) // package function retained
 (*Handle[T]).Read() (T, error)
 (*Handle[T]).Write(value T) error
 
@@ -59,6 +59,16 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 (*Connection).GenerateStructBody(symbolName string) (string, error)
 (*Connection).AnalyzeType(symbolName string) (*GeneratedTypeInfo, error)
 ```
+
+## RPC implementation
+
+- `metadata_rpc.go` parses RPC methods, ordered parameters, attributes and type GUIDs through the shared datatype-tail parser.
+- `binding.go` owns typed symbol/batch rebinding; `ads.go` owns deduplicated named handles for symbols and methods. Lifecycle reset invalidates that table; Close releases its handles.
+- `rpc.go`: `Connection.BindRPC[I,O]`, `RPC.Call(ctx,input)`, `RPCMethods`, `RPCOptions.Signature`, `ErrRPCSignatureChanged`, `UnsupportedRPCError`.
+- `codegen_rpc.go` emits named clients, records and shared type dependencies. File formatting/collision checks and enums live in the library, used by the CLI's `-rpc=instance=Client` option.
+- RPC records reuse the existing codec. Empty records are supported; unsupported reference/pointer/length-linked signatures fail explicitly. Calls are never retried.
+- Caller cancellation reaches generation admission, shared handle acquisition and requests. Do not add goroutines solely to wait on locks.
+- `examples/rpc` contains generated Go and PLC sources. The golden metadata is synthetic; it does not establish real PLC ABI validation.
 
 ## Verified behavior
 
@@ -85,8 +95,8 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 
 ## Open work
 
-- Immediate focus: rerun v0.1.0 live PLC smoke and exercise reconnect/online schema changes on a real target; offline socket and race regression gates cover the hardened implementation.
-- Deferred extras: RPC invocation support.
+- Immediate focus: run the RPC fixture and rerun live PLC smoke and exercise reconnect/online schema changes on a real target; offline socket and race regression gates cover the hardened implementation.
+- Deferred extras: pointer/reference RPC marshalling, length-linked buffers, custom packing.
 
 ## Core style and implementation patterns
 

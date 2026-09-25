@@ -52,7 +52,7 @@ func TestReviewStructWrongWidth(t *testing.T) {
 
 func TestReviewBatchConnectionOwnership(t *testing.T) {
 	c1, c2 := reviewConn(t), reviewConn(t)
-	h := &Handle[int16]{conn: c2, handle: 99, length: 2, dataType: "INT", symbolName: "MAIN.x"}
+	h := &Handle[int16]{symbolBinding: symbolBinding{conn: c2, handle: 99, length: 2, dataType: "INT", symbolName: "MAIN.x"}}
 	if _, err := NewBatchWriter[struct{ X int16 }](c1, h); err == nil {
 		t.Error("batch accepts handle belonging to another connection")
 	}
@@ -62,12 +62,12 @@ func TestReviewBatchStaleEpoch(t *testing.T) {
 	c := reviewConn(t)
 	c.epoch.Store(2)
 	c.symbols = map[string]*Symbol{"MAIN.x": {Handle: 22, Length: 2, DataType: "INT"}}
-	h := &Handle[int16]{conn: c, handle: 11, length: 2, dataType: "INT", symbolName: "MAIN.x", bindEpoch: 1}
+	h := &Handle[int16]{symbolBinding: symbolBinding{conn: c, handle: 11, length: 2, dataType: "INT", symbolName: "MAIN.x", bindEpoch: 1}}
 	br, err := NewBatchReader[struct{ X int16 }](c, h)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureHandleInfoBound(&br.handles[0]); err != nil {
+	if err := br.handles[0].bind(); err != nil {
 		t.Fatal(err)
 	}
 	if br.handles[0].handle != 22 {
@@ -217,7 +217,7 @@ func TestReviewConcurrentRebind(t *testing.T) {
 	c := reviewConn(t)
 	c.epoch.Store(2)
 	c.symbols = map[string]*Symbol{"MAIN.x": {Handle: 22, Length: 2, DataType: "INT"}}
-	h := &Handle[int16]{conn: c, handle: 11, length: 2, dataType: "INT", symbolName: "MAIN.x", bindEpoch: 1}
+	h := &Handle[int16]{symbolBinding: symbolBinding{conn: c, handle: 11, length: 2, dataType: "INT", symbolName: "MAIN.x", bindEpoch: 1}}
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for range 32 {

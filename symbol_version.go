@@ -156,6 +156,7 @@ func (conn *Connection) refreshMetadataAndSubscriptions() error {
 }
 
 func (conn *Connection) resetNotificationStateLocked() {
+	conn.namedHandles = nil
 	conn.pendingBytes = 0
 	conn.notificationGeneration++
 	conn.unknownCleanup = make(map[uint32]bool)

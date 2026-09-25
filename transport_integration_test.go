@@ -14,14 +14,20 @@ import (
 )
 
 type fakeRouter struct {
-	listener     net.Listener
-	generation   atomic.Uint32
-	wide         atomic.Bool
-	mu           sync.Mutex
-	sockets      []net.Conn
-	wg           sync.WaitGroup
-	handles      atomic.Int32
-	notification atomic.Uint32
+	rpcClosing                  atomic.Bool
+	rpcReleased                 atomic.Uint32
+	rpcReleaseCount             atomic.Int32
+	rpcShortReply               atomic.Bool
+	rpc, rpcChanged, rpcNoReply atomic.Bool
+	rpcCalls                    atomic.Int32
+	listener                    net.Listener
+	generation                  atomic.Uint32
+	wide                        atomic.Bool
+	mu                          sync.Mutex
+	sockets                     []net.Conn
+	wg                          sync.WaitGroup
+	handles                     atomic.Int32
+	notification                atomic.Uint32
 }
 
 func newFakeRouter(t *testing.T) *fakeRouter {
@@ -124,10 +130,10 @@ func (router *fakeRouter) serve(conn net.Conn) {
 				switch group {
 				case uint32(GroupSymbolUploadInfo2):
 					var info bytes.Buffer
-					_ = binary.Write(&info, binary.LittleEndian, SymbolUploadInfo{SymbolCount: 1, SymbolLength: uint32(len(router.symbolUpload()))})
+					_ = binary.Write(&info, binary.LittleEndian, SymbolUploadInfo{SymbolCount: 1, SymbolLength: uint32(len(router.symbolUpload())), DataTypeLength: uint32(len(router.datatypeUpload()))})
 					payload = fakePayload(info.Bytes())
 				case uint32(GroupSymbolDataTypeUpload):
-					payload = fakePayload(nil)
+					payload = fakePayload(router.datatypeUpload())
 				case uint32(GroupSymbolUpload):
 					payload = fakePayload(router.symbolUpload())
 				case uint32(GroupSymbolVersion):
@@ -146,8 +152,35 @@ func (router *fakeRouter) serve(conn net.Conn) {
 				if group == uint32(GroupSymbolHandleByName) {
 					router.handles.Add(1)
 					value := make([]byte, 4)
-					binary.LittleEndian.PutUint32(value, generation*100)
+					handle := generation * 100
+					if router.rpc.Load() {
+						handle++
+						if string(data[16:]) == "MAIN.rpc#Ping\x00" {
+							handle++
+						}
+					}
+					binary.LittleEndian.PutUint32(value, handle)
 					payload = fakePayload(value)
+				} else if group == uint32(GroupSymbolValueByHandle) && router.rpc.Load() {
+					router.rpcCalls.Add(1)
+					if router.rpcNoReply.Load() {
+						continue
+					}
+					handle := binary.LittleEndian.Uint32(data[4:])
+					if handle == generation*100+2 {
+						payload = fakePayload(nil)
+					} else if handle != generation*100+1 || len(data) != 23 || binary.LittleEndian.Uint32(data[8:]) != 7 || binary.LittleEndian.Uint32(data[12:]) != 7 {
+						payload = []byte{5, 7, 0, 0}
+					} else {
+						result := make([]byte, 7)
+						binary.LittleEndian.PutUint32(result, uint32(int32(int8(data[16]))+int32(binary.LittleEndian.Uint32(data[17:]))))
+						result[4] = 1
+						binary.LittleEndian.PutUint16(result[5:], binary.LittleEndian.Uint16(data[21:])+1)
+						if router.rpcShortReply.Load() {
+							result = result[:len(result)-1]
+						}
+						payload = fakePayload(result)
+					}
 				} else if group == uint32(GroupSumupRead) {
 					count := int(binary.LittleEndian.Uint32(data[4:]))
 					result := make([]byte, count*6)
@@ -169,6 +202,13 @@ func (router *fakeRouter) serve(conn net.Conn) {
 				payload = make([]byte, 8)
 				binary.LittleEndian.PutUint32(payload[4:], router.notification.Add(1))
 			case CommandIDDeleteDeviceNotification, CommandIDWrite:
+				if command == CommandIDWrite && len(data) >= 16 && binary.LittleEndian.Uint32(data) == uint32(GroupSymbolReleaseHandle) {
+					router.rpcReleased.Store(binary.LittleEndian.Uint32(data[12:]))
+					router.rpcReleaseCount.Add(1)
+				}
+				if router.rpcClosing.Load() {
+					continue
+				}
 				payload = make([]byte, 4)
 			default:
 				return
@@ -188,18 +228,18 @@ func (router *fakeRouter) serve(conn net.Conn) {
 func TestRealTransportBootstrapReconnectAndBatch(t *testing.T) {
 	router := newFakeRouter(t)
 	conn := router.connect(t, true)
-	h, err := GetHandle[int16](conn, "MAIN.x")
+	h, err := conn.GetHandle[int16]("MAIN.x")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if v, err := h.Read(); err != nil || v != 42 {
 		t.Fatalf("initial read %d %v", v, err)
 	}
-	reader, err := NewBatchReader[struct{ X int16 }](conn, h)
+	reader, err := conn.NewBatchReader[struct{ X int16 }](h)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writer, err := NewBatchWriter[struct{ X int16 }](conn, h)
+	writer, err := conn.NewBatchWriter[struct{ X int16 }](h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +310,9 @@ func TestConcurrentColdAcquisitionAndRouterCalls(t *testing.T) {
 }
 
 func (router *fakeRouter) symbolUpload() []byte {
+	if router.rpc.Load() {
+		return symbolWire("MAIN.rpc", "FB_RPC", 1)
+	}
 	if router.wide.Load() {
 		return symbolWire("MAIN.x", "DINT", 4)
 	}
@@ -353,4 +396,15 @@ func TestRouterUnregisterIsOneWay(t *testing.T) {
 	if err := conn.Router().UnregisterPort(0x1234); err != nil {
 		t.Fatalf("one-way unregister: %v", err)
 	}
+}
+
+func (router *fakeRouter) datatypeUpload() []byte {
+	if !router.rpc.Load() {
+		return nil
+	}
+	method := rpcTestMethod()
+	if router.rpcChanged.Load() {
+		method.Parameters[0].Name = "renamed"
+	}
+	return rpcDatatypeWire(method, RPCMethod{Name: "Ping", Version: 1, Flags: 1})
 }

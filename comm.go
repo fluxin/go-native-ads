@@ -15,6 +15,7 @@ import (
 const defaultMaxFrameSize = 16 << 20
 
 type outgoingPacket struct {
+	ctx     context.Context
 	data    []byte
 	written chan error
 }
@@ -136,11 +137,14 @@ func (conn *Connection) sendRequest(command CommandID, data []byte) ([]byte, err
 	return conn.request(command, data, false)
 }
 func (conn *Connection) request(command CommandID, data []byte, internal bool) ([]byte, error) {
+	return conn.requestContext(context.Background(), command, data, internal)
+}
+func (conn *Connection) requestContext(caller context.Context, command CommandID, data []byte, internal bool) ([]byte, error) {
 	if conn == nil {
 		return nil, errors.New("connection is nil")
 	}
 	if !internal {
-		if err := conn.beginOperation(); err != nil {
+		if err := conn.beginOperationContext(caller); err != nil {
 			return nil, err
 		}
 		defer conn.endOperation()
@@ -152,8 +156,16 @@ func (conn *Connection) request(command CommandID, data []byte, internal bool) (
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(transport, conn.requestTimeout())
+	ctx, cancel := context.WithTimeout(caller, conn.requestTimeout())
 	defer cancel()
+	stop := context.AfterFunc(transport, cancel)
+	defer stop()
+	if err := transport.Err(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	reply := make(chan commandResponse, 1)
 	conn.activeRequestLock.Lock()
 	id := atomic.AddUint32(&conn.currentRequest, 1)
@@ -172,7 +184,7 @@ func (conn *Connection) request(command CommandID, data []byte, internal bool) (
 		return nil, err
 	}
 	select {
-	case send <- outgoingPacket{data: packet}:
+	case send <- outgoingPacket{data: packet, ctx: ctx}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -289,6 +301,10 @@ func (conn *Connection) transmitWorker(ctx context.Context, connection net.Conn)
 		case <-ctx.Done():
 			return
 		case packet := <-send:
+			if packet.ctx != nil && packet.ctx.Err() != nil {
+				packet.complete(packet.ctx.Err())
+				continue
+			}
 			data := packet.data
 			if ctx.Err() != nil {
 				packet.complete(ctx.Err())

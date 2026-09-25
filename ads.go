@@ -44,7 +44,7 @@ func (conn *Connection) GetSymbol(symbolName string) (*Symbol, error) {
 // Acquisition does not hold the notification/metadata mutex over network I/O.
 type handleAcquisition struct {
 	done   chan struct{}
-	symbol *Symbol
+	handle uint32
 	err    error
 }
 
@@ -61,44 +61,65 @@ func (conn *Connection) lookupSymbol(name string, internal bool) (*Symbol, error
 		conn.symbolLock.Unlock()
 		return nil, fmt.Errorf("symbol %s does not exist", name)
 	}
-	if symbol.Handle != 0 {
-		copy := cloneSymbol(symbol)
-		conn.symbolLock.Unlock()
+	copy := cloneSymbol(symbol)
+	conn.symbolLock.Unlock()
+	if copy.Handle != 0 {
 		return copy, nil
 	}
-	if conn.acquisitions == nil {
-		conn.acquisitions = make(map[string]*handleAcquisition)
+	handle, err := conn.acquireNamedHandle(context.Background(), name, internal)
+	if err != nil {
+		return nil, err
+	}
+	copy.Handle = handle
+	conn.symbolLock.Lock()
+	conn.symbols[name] = copy
+	conn.symbolLock.Unlock()
+	return copy, nil
+}
+
+// Callers pin the generation. One connection owns every named ADS handle,
+// including method handles which have no ordinary symbol-table entry.
+func (conn *Connection) acquireNamedHandle(ctx context.Context, name string, internal bool) (uint32, error) {
+	conn.symbolLock.Lock()
+	if handle := conn.namedHandles[name]; handle != 0 {
+		conn.symbolLock.Unlock()
+		return handle, nil
 	}
 	if pending := conn.acquisitions[name]; pending != nil {
 		conn.symbolLock.Unlock()
 		select {
 		case <-pending.done:
-			return pending.symbol, pending.err
-		case <-conn.ctx.Done():
-			return nil, conn.ctx.Err()
+			return pending.handle, pending.err
+		case <-ctx.Done():
+			return 0, ctx.Err()
 		}
 	}
 	pending := &handleAcquisition{done: make(chan struct{})}
+	if conn.acquisitions == nil {
+		conn.acquisitions = make(map[string]*handleAcquisition)
+	}
 	conn.acquisitions[name] = pending
-	copy := cloneSymbol(symbol)
 	conn.symbolLock.Unlock()
-	resp, err := conn.writeRead(uint32(GroupSymbolHandleByName), 0, 4, append([]byte(name), 0), internal)
+	resp, err := conn.writeReadContext(ctx, uint32(GroupSymbolHandleByName), 0, 4, append([]byte(name), 0), internal)
+	var handle uint32
 	if err == nil {
-		copy.Handle = binary.LittleEndian.Uint32(resp)
-		if copy.Handle == 0 {
+		handle = binary.LittleEndian.Uint32(resp)
+		if handle == 0 {
 			err = fmt.Errorf("server returned zero symbol handle")
 		}
 	}
 	conn.symbolLock.Lock()
 	if err == nil {
-		conn.symbols[name] = copy
-		pending.symbol = copy
+		if conn.namedHandles == nil {
+			conn.namedHandles = make(map[string]uint32)
+		}
+		conn.namedHandles[name] = handle
 	}
-	pending.err = err
+	pending.handle, pending.err = handle, err
 	delete(conn.acquisitions, name)
 	close(pending.done)
 	conn.symbolLock.Unlock()
-	return pending.symbol, err
+	return handle, err
 }
 func (conn *Connection) datatypeSnapshot() map[string]SymbolUploadDataType {
 	conn.symbolLock.Lock()

@@ -1,6 +1,6 @@
 module simple
 
-go 1.26
+go 1.27
 
 require github.com/fluxin/go-native-ads v0.1.0
 

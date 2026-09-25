@@ -21,6 +21,13 @@ func (conn *Connection) GetEnum(typeName string) (EnumInfo, error) {
 	if !ok {
 		return EnumInfo{}, fmt.Errorf("datatype %s not found", typeName)
 	}
+	for depth := 0; len(dt.EnumMembers) == 0 && depth < 64; depth++ {
+		next, ok := conn.datatypes[dt.DataType]
+		if !ok || dt.DataType == dt.Name {
+			break
+		}
+		dt = next
+	}
 	if len(dt.EnumMembers) == 0 {
 		return EnumInfo{}, fmt.Errorf("datatype %s is not an enum", typeName)
 	}
@@ -37,7 +44,7 @@ func (conn *Connection) GetEnum(typeName string) (EnumInfo, error) {
 		values[member.Name] = member.Value
 	}
 
-	return EnumInfo{Name: dt.Name, BaseType: baseType, Values: values}, nil
+	return EnumInfo{Name: typeName, BaseType: baseType, Values: values}, nil
 }
 
 func sortedEnumValueNames(values map[string]int64) []string {

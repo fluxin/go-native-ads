@@ -8,11 +8,9 @@ import (
 
 // BatchWriter reuses its command and payload buffers. Concurrent calls are serialized.
 type BatchWriter[T any] struct {
-	conn     *Connection
+	batchPlan
 	mu       sync.Mutex
-	handles  []handleInfo
 	commands []sumWriteSubCommand
-	fields   []fieldInfo
 	data     []byte
 }
 
@@ -28,7 +26,7 @@ func NewBatchWriter[T any](conn *Connection, handles ...any) (*BatchWriter[T], e
 	if err != nil {
 		return nil, err
 	}
-	return &BatchWriter[T]{conn: conn, handles: infos, fields: fields, commands: make([]sumWriteSubCommand, len(infos))}, nil
+	return &BatchWriter[T]{batchPlan: batchPlan{conn: conn, handles: infos, fields: fields}, commands: make([]sumWriteSubCommand, len(infos))}, nil
 }
 
 // Write validates and encodes all fields before sending. The PLC may accept only
@@ -41,10 +39,10 @@ func (bw *BatchWriter[T]) Write(source T) error {
 	}
 	defer bw.conn.endOperation()
 	total := uint64(0)
+	if err := bw.batchPlan.bind(); err != nil {
+		return err
+	}
 	for i := range bw.handles {
-		if err := ensureHandleInfoBound(&bw.handles[i]); err != nil {
-			return err
-		}
 		total += uint64(bw.handles[i].length)
 	}
 	if total+uint64(12*len(bw.handles))+48 > uint64(bw.conn.frameLimit()) {

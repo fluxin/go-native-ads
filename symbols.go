@@ -37,6 +37,9 @@ type SymbolUploadDataType struct {
 	Comment           string
 	Children          map[string]*SymbolUploadDataType
 	EnumMembers       []EnumMember
+	TypeGUID          [16]byte
+	Methods           []RPCMethod
+	Attributes        []Attribute
 }
 
 type EnumMember struct {
@@ -284,11 +287,8 @@ func decodeDatatype(data *bytes.Buffer, depth int, budget *int) (header SymbolUp
 			header.Children[child.Name] = &child
 		}
 	}
-	if hasDatatypeFlag(entry.Flags, datatypeFlagEnumInfos) {
-		header.EnumMembers, err = parseEnumMembersFromDatatypeTail(buf, entry.Flags, int(entry.Size), header.DataType)
-		if err != nil {
-			return header, err
-		}
+	if err = parseDatatypeTail(buf, &header, budget); err != nil {
+		return header, err
 	}
 	return header, nil
 }
@@ -326,82 +326,6 @@ func parseEnumMembers(buf *bytes.Buffer, baseType string, valueSize int) ([]Enum
 		members = append(members, EnumMember{Name: name, Value: value})
 	}
 	return members, nil
-}
-
-func parseEnumMembersFromDatatypeTail(buf *bytes.Buffer, flags uint32, valueSize int, baseType string) ([]EnumMember, error) {
-	// Tail layout can contain optional sections before enum infos.
-	if hasDatatypeFlag(flags, datatypeFlagTypeGUID) {
-		if buf.Len() < 16 {
-			return nil, fmt.Errorf("datatype tail missing type guid")
-		}
-		buf.Next(16)
-	}
-	if hasDatatypeFlag(flags, datatypeFlagCopyMask) {
-		if buf.Len() < valueSize {
-			return nil, fmt.Errorf("datatype tail missing copy mask")
-		}
-		buf.Next(valueSize)
-	}
-	if hasDatatypeFlag(flags, datatypeFlagMethodInfos) {
-		if err := skipDatatypeMethodInfos(buf); err != nil {
-			return nil, err
-		}
-	}
-	if hasDatatypeFlag(flags, datatypeFlagAttributes) {
-		if err := skipDatatypeAttributes(buf); err != nil {
-			return nil, err
-		}
-	}
-
-	members, err := parseEnumMembers(buf, baseType, valueSize)
-	if err != nil {
-		return nil, err
-	}
-
-	if hasDatatypeFlag(flags, datatypeFlagExtendedEnumInfos) {
-		if err := skipExtendedEnumInfos(buf, len(members)); err != nil {
-			return nil, err
-		}
-	}
-	return members, nil
-}
-
-func skipDatatypeMethodInfos(buf *bytes.Buffer) error {
-	if buf.Len() < 2 {
-		return fmt.Errorf("datatype method info count missing")
-	}
-	count := int(binary.LittleEndian.Uint16(buf.Next(2)))
-	for i := range count {
-		if buf.Len() < 4 {
-			return fmt.Errorf("datatype method %d entry length missing", i)
-		}
-		entryLen := int(binary.LittleEndian.Uint32(buf.Next(4)))
-		if entryLen < 4 || buf.Len() < entryLen-4 {
-			return fmt.Errorf("datatype method %d entry truncated", i)
-		}
-		buf.Next(entryLen - 4)
-	}
-	return nil
-}
-
-func skipDatatypeAttributes(buf *bytes.Buffer) error {
-	if buf.Len() < 2 {
-		return fmt.Errorf("datatype attribute count missing")
-	}
-	count := int(binary.LittleEndian.Uint16(buf.Next(2)))
-	for i := range count {
-		if buf.Len() < 2 {
-			return fmt.Errorf("datatype attribute %d lengths missing", i)
-		}
-		nameLen := int(buf.Next(1)[0])
-		valueLen := int(buf.Next(1)[0])
-		need := nameLen + 1 + valueLen + 1
-		if buf.Len() < need {
-			return fmt.Errorf("datatype attribute %d payload truncated", i)
-		}
-		buf.Next(need)
-	}
-	return nil
 }
 
 func skipExtendedEnumInfos(buf *bytes.Buffer, count int) error {

@@ -9,22 +9,15 @@ import (
 
 // Handle is a reusable typed symbol binding. Its operations are safe concurrently.
 type Handle[T any] struct {
-	conn       *Connection
-	mu         sync.Mutex
-	handle     uint32
-	length     uint32
-	dataType   string
-	symbolName string
-	symbol     *Symbol
-	bindEpoch  uint64
-	codec      *codecNode
+	mu sync.Mutex
+	symbolBinding
 }
 
 func GetHandle[T any](conn *Connection, name string) (*Handle[T], error) {
 	if conn == nil {
 		return nil, fmt.Errorf("nil connection")
 	}
-	h := &Handle[T]{conn: conn, symbolName: name}
+	h := &Handle[T]{symbolBinding: symbolBinding{conn: conn, symbolName: name, typ: reflect.TypeFor[T]()}}
 	if err := h.ensureBound(); err != nil {
 		return nil, err
 	}
@@ -33,29 +26,13 @@ func GetHandle[T any](conn *Connection, name string) (*Handle[T], error) {
 func (h *Handle[T]) binding() (*Symbol, *codecNode, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	epoch := h.conn.CurrentEpoch()
-	if h.bindEpoch == epoch && h.handle != 0 && h.codec != nil {
-		return h.symbol, h.codec, nil
-	}
-	symbol, err := h.conn.lookupSymbol(h.symbolName, true)
-	if err != nil {
+	h.typ = reflect.TypeFor[T]()
+	if err := h.symbolBinding.bind(); err != nil {
 		return nil, nil, err
 	}
-	if uint64(symbol.Length)+40 > uint64(h.conn.frameLimit()) {
-		return nil, nil, fmt.Errorf("symbol exceeds frame limit")
-	}
-	plan, err := codecFor(reflect.TypeFor[T](), symbol, h.conn.datatypeSnapshot())
-	if err != nil {
-		return nil, nil, err
-	}
-	h.handle = symbol.Handle
-	h.length = symbol.Length
-	h.dataType = symbol.DataType
-	h.symbol = symbol
-	h.bindEpoch = epoch
-	h.codec = plan
-	return symbol, plan, nil
+	return h.symbol, h.codec, nil
 }
+
 func (h *Handle[T]) ensureBound() error {
 	if err := h.conn.beginOperation(); err != nil {
 		return err

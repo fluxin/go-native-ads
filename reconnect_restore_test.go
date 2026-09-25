@@ -138,7 +138,7 @@ func TestHandleEnsureBoundRebindsOnEpochChange(t *testing.T) {
 	}
 	conn.epoch.Store(2)
 
-	h := &Handle[Int16]{
+	h := &Handle[Int16]{symbolBinding: symbolBinding{
 		conn:       conn,
 		handle:     11,
 		length:     2,
@@ -146,7 +146,7 @@ func TestHandleEnsureBoundRebindsOnEpochChange(t *testing.T) {
 		symbolName: "MAIN.x",
 		symbol:     &Symbol{FullName: "MAIN.x", Handle: 11, Length: 2, DataType: "INT"},
 		bindEpoch:  1,
-	}
+	}}
 
 	if err := h.ensureBound(); err != nil {
 		t.Fatalf("ensureBound failed: %v", err)

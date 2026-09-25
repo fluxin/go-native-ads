@@ -257,7 +257,15 @@ func (conn *Connection) ensureConnected() error {
 
 // The generation read lock pins schema and binding information for a typed operation.
 func (conn *Connection) beginOperation() error {
-	conn.generationLock.RLock()
+	return conn.beginOperationContext(context.Background())
+}
+func (conn *Connection) beginOperationContext(ctx context.Context) error {
+	if conn == nil {
+		return ErrNotConnected
+	}
+	if err := conn.generationLock.RLockContext(ctx); err != nil {
+		return err
+	}
 	if err := conn.ensureConnected(); err != nil {
 		conn.generationLock.RUnlock()
 		return err

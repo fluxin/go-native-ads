@@ -1,0 +1,4 @@
+FUNCTION_BLOCK FB_RPC
+VAR
+    calls : UDINT;
+END_VAR

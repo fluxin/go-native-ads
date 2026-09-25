@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.0 — Unreleased
+
+- Raise the development minimum to Go 1.27 and add generic `Connection.GetHandle`, `NewBatchReader`, `NewBatchWriter`, and `BindRPC` methods. Existing symbol/batch package functions remain compatible.
+- Add bounded RPC metadata parsing, typed fixed-layout calls with per-call context, shared named-handle ownership and reconnect/schema signature validation. Calls are never automatically retried.
+- Generate typed RPC clients, input/result records, dependent structs/enums, and void methods via `-rpc=instance=Client`. Share formatting, enum emission and collision checks between library and CLI.
+- Consolidate symbol/batch binding logic and batch layout state. Reuse the codec for RPC values and empty records.
+- Add exact-wire, malformed-metadata, concurrent-call, cancellation, reconnect, schema-change, and generated-client execution tests plus a PLC smoke fixture.
+- Offline validation: root/CLI race tests, vet across all five modules, generated-client execution against the fake router, and 452,920 RPC fuzz cases pass.
+- Pointer/reference and length-linked signatures remain unsupported. Live captured RPC fixtures and real TwinCAT validation remain open; see `examples/rpc/README.md`.
+
 ## v0.1.0 — 2026-09-25
 
 First release at [github.com/fluxin/go-native-ads](https://github.com/fluxin/go-native-ads). This minor release includes the module-path migration and stricter runtime validation. Requires Go 1.26 or newer.

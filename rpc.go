@@ -33,12 +33,14 @@ type RPC[I, O any] struct {
 	instance, method, signature string
 	mu                          sync.Mutex
 	epoch                       uint64
-	input, output               *codecNode
+	input, output               *rpcRecordCodec
 }
 
-// BindRPC validates a fixed-layout method. Inputs and outputs are structs with
+// BindRPC validates a method. Inputs and outputs are structs with
 // ads tags matching parameter names. The result's ads:"$return" field holds the
 // PLC return value. Use struct{} for an empty input or output record.
+// References use values, not Go pointers. Length-linked buffers use slices;
+// their lengths must match the linked input count (in elements).
 // Handles are acquired lazily by Call, then owned until the connection generation ends.
 func (conn *Connection) BindRPC[I, O any](instance, method string, options ...RPCOptions) (*RPC[I, O], error) {
 	if len(options) > 1 {
@@ -59,7 +61,7 @@ func (conn *Connection) BindRPC[I, O any](instance, method string, options ...RP
 	return r, nil
 }
 
-func (r *RPC[I, O]) binding() (*codecNode, *codecNode, error) {
+func (r *RPC[I, O]) binding() (*rpcRecordCodec, *rpcRecordCodec, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	epoch := r.conn.CurrentEpoch()
@@ -77,11 +79,11 @@ func (r *RPC[I, O]) binding() (*codecNode, *codecNode, error) {
 	if r.signature != "" && signature != r.signature {
 		return nil, nil, fmt.Errorf("%w: %s#%s", ErrRPCSignatureChanged, r.instance, r.method)
 	}
-	input, err := codecFor(reflect.TypeFor[I](), in, types)
+	input, err := compileRPCRecord(reflect.TypeFor[I](), reflect.TypeFor[I](), in, types)
 	if err != nil {
 		return nil, nil, fmt.Errorf("RPC input: %w", err)
 	}
-	output, err := codecFor(reflect.TypeFor[O](), out, types)
+	output, err := compileRPCRecord(reflect.TypeFor[O](), reflect.TypeFor[I](), out, types)
 	if err != nil {
 		return nil, nil, fmt.Errorf("RPC output: %w", err)
 	}
@@ -111,20 +113,29 @@ func (r *RPC[I, O]) Call(ctx context.Context, input I) (O, error) {
 	if err != nil {
 		return zero, err
 	}
-	data := make([]byte, in.size)
-	if err = in.encode(reflect.ValueOf(input), data); err != nil {
+	value := reflect.ValueOf(input)
+	inputSizes, inputSize, err := in.sizes(value, true, r.conn.frameLimit())
+	if err != nil {
+		return zero, err
+	}
+	outputSizes, outputSize, err := out.sizes(value, false, r.conn.frameLimit())
+	if err != nil {
+		return zero, err
+	}
+	data := make([]byte, inputSize)
+	if err = in.encode(value, inputSizes, data); err != nil {
 		return zero, err
 	}
 	handle, err := r.conn.acquireNamedHandle(ctx, r.instance+"#"+r.method, true)
 	if err != nil {
 		return zero, err
 	}
-	response, err := r.conn.writeReadContext(ctx, uint32(GroupSymbolValueByHandle), handle, uint32(out.size), data, true)
+	response, err := r.conn.writeReadContext(ctx, uint32(GroupSymbolValueByHandle), handle, uint32(outputSize), data, true)
 	if err != nil {
 		return zero, fmt.Errorf("RPC %s#%s: %w", r.instance, r.method, err)
 	}
 	var result O
-	if err = out.decode(reflect.ValueOf(&result).Elem(), response); err != nil {
+	if err = out.decode(reflect.ValueOf(&result).Elem(), outputSizes, response); err != nil {
 		return zero, err
 	}
 	return result, nil
@@ -274,19 +285,25 @@ func rpcSchema(m RPCMethod, types map[string]SymbolUploadDataType, limit uint32)
 			return reject("$return", err.Error())
 		}
 	}
-	for _, p := range m.Parameters {
-		if p.Flags & ^(RPCIn|RPCOut|RPCParameterAttributes) != 0 || p.Flags&(RPCIn|RPCOut) == 0 || p.LengthIsParameterIndex != 0 || hasLengthAttribute(p.Attributes) {
-			return reject(p.Name, "pointer/reference, length-linked, array-dimension or unknown parameter flags")
+	for i, p := range m.Parameters {
+		if p.Flags & ^(RPCIn|RPCOut|RPCByReference|RPCParameterAttributes) != 0 || p.Flags&(RPCIn|RPCOut) == 0 {
+			return reject(p.Name, "missing direction, array-dimension or unknown parameter flags")
+		}
+		dt, size, length, err := rpcParameterValue(m, i, types)
+		if err != nil {
+			return reject(p.Name, err.Error())
 		}
 		if p.Flags&RPCIn != 0 {
-			if err := add(in, p.Name, p.DataType, p.Comment, p.Size, p.AlignSize); err != nil {
+			if err := add(in, p.Name, dt, p.Comment, size, p.AlignSize); err != nil {
 				return reject(p.Name, err.Error())
 			}
+			in.Children[p.Name].rpcLength = length
 		}
 		if p.Flags&RPCOut != 0 {
-			if err := add(out, p.Name, p.DataType, p.Comment, p.Size, p.AlignSize); err != nil {
+			if err := add(out, p.Name, dt, p.Comment, size, p.AlignSize); err != nil {
 				return reject(p.Name, err.Error())
 			}
+			out.Children[p.Name].rpcLength = length
 		}
 	}
 	hash := sha256.New()
@@ -312,6 +329,9 @@ func rpcSchema(m RPCMethod, types map[string]SymbolUploadDataType, limit uint32)
 	var visit func(*Symbol)
 	visit = func(s *Symbol) {
 		fmt.Fprintf(hash, "%q:%q:%d:%d;", s.Name, s.DataType, s.Offset, s.Length)
+		if s.rpcLength != "" {
+			fmt.Fprintf(hash, "length:%q;", s.rpcLength)
+		}
 		name := s.DataType
 		for range 64 {
 			dt, ok := types[name]

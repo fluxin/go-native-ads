@@ -106,11 +106,16 @@ func (conn *Connection) GenerateRPCClients(clients map[string]string) (string, e
 					if err != nil {
 						return "", err
 					}
+					comment := f.Comment
+					if f.rpcLength != "" {
+						typ = "[]" + typ
+						comment += " Length in elements is set by input " + f.rpcLength + "."
+					}
 					name := goName(f.Name)
 					if f.Name == "$return" {
 						name = "ReturnValue"
 					}
-					emitRPCField(&records, name, typ, f.Name, f.Comment)
+					emitRPCField(&records, name, typ, f.Name, comment)
 				}
 				records.WriteString("}\n")
 			}

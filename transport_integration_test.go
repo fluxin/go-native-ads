@@ -14,6 +14,7 @@ import (
 )
 
 type fakeRouter struct {
+	rpcBuffers                  atomic.Bool
 	rpcClosing                  atomic.Bool
 	rpcReleased                 atomic.Uint32
 	rpcReleaseCount             atomic.Int32
@@ -167,7 +168,9 @@ func (router *fakeRouter) serve(conn net.Conn) {
 						continue
 					}
 					handle := binary.LittleEndian.Uint32(data[4:])
-					if handle == generation*100+2 {
+					if router.rpcBuffers.Load() {
+						payload = rpcBufferResponse(data, router.rpcShortReply.Load())
+					} else if handle == generation*100+2 {
 						payload = fakePayload(nil)
 					} else if handle != generation*100+1 || len(data) != 23 || binary.LittleEndian.Uint32(data[8:]) != 7 || binary.LittleEndian.Uint32(data[12:]) != 7 {
 						payload = []byte{5, 7, 0, 0}
@@ -403,6 +406,13 @@ func (router *fakeRouter) datatypeUpload() []byte {
 		return nil
 	}
 	method := rpcTestMethod()
+	if router.rpcBuffers.Load() {
+		method = rpcBufferMethod()
+		if router.rpcChanged.Load() {
+			method.Parameters[2].DataType = "POINTER TO UINT"
+		}
+		return rpcDatatypeWire(method)
+	}
 	if router.rpcChanged.Load() {
 		method.Parameters[0].Name = "renamed"
 	}

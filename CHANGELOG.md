@@ -8,7 +8,8 @@
 - Consolidate symbol/batch binding logic and batch layout state. Reuse the codec for RPC values and empty records.
 - Add exact-wire, malformed-metadata, concurrent-call, cancellation, reconnect, schema-change, and generated-client execution tests plus a PLC smoke fixture.
 - Offline validation: root/CLI race tests, vet across all five modules, generated-client execution against the fake router, and 452,920 RPC fuzz cases pass.
-- Pointer/reference and length-linked signatures remain unsupported. Live captured RPC fixtures and real TwinCAT validation remain open; see `examples/rpc/README.md`.
+- Add fixed reference/INOUT values and typed `TcRpcLengthIs` slices, with input-only element counts, bounded allocation, exact input lengths, and generated buffer fields. Include compound pointee codecs, independent fake-router wire checks, concurrent/reconnect tests, generated-client execution and 122,445 successful buffer fuzz cases.
+- Preserve the fixed-layout implementation as `rpc-fixed-layout-checkpoint` (`2a67b775`) and the extension as `rpc-reference-checkpoint`. Live captured RPC fixtures and real TwinCAT validation remain open for both; see `RPC_CHECKPOINTS.md`.
 
 ## v0.1.0 — 2026-09-25
 

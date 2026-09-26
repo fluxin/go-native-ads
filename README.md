@@ -7,7 +7,7 @@ based on my original implementation and cleaned up for modern golang. Generics a
 
 Current published release: **v0.1.0** (Go 1.26). The working tree targets **v0.2.0** (Go 1.27) with typed RPC and generated clients. See [CHANGELOG.md](CHANGELOG.md) for migration and compatibility notes, [PERFORMANCE.md](PERFORMANCE.md) for measured CPU improvements, and [PLAN.md](PLAN.md) for remaining work.
 
-- Core behavior is implemented: connect, typed handle read/write, batch read/write (sum commands), notifications, symbol/type upload, fixed-layout RPC invocation, and code generation.
+- Core behavior is implemented: connect, typed handle read/write, batch read/write (sum commands), notifications, symbol/type upload, typed RPC invocation, and code generation.
 - Recent protocol/correctness fixes are in place for notification timing, sum parsing, command response validation, and array metadata handling.
 - Reconnect and subscription restoration foundations are implemented: policy-driven lifecycle hooks, reconnect loop, epoch-based handle rebinding, and subscription replay.
 - Symbol-version change detection and metadata/subscription refresh are implemented via `GroupSymbolVersion` monitoring.
@@ -154,7 +154,8 @@ fmt.Println(result.ReturnValue)
 For handwritten typed bindings, use `conn.BindRPC[Input, Result](instance, method)` and `binding.Call(ctx, input)`. Input/output structs use `ads` tags matching PLC parameter names; the return value uses `ads:"$return"`. Empty records use `struct{}`. Generated void methods return only `error`, and methods without inputs omit the input argument.
 
 - Supported fixed values use the shared codec: primitives, STRING, time values, enums, nested structures and fixed arrays where metadata describes their complete layout. Fixed IN|OUT parameters appear in both records.
-- Pointer/reference flags, length-linked buffers, RPC array-dimension flags, custom packing and unknown signatures return `UnsupportedRPCError`. In particular, a PLC INOUT declaration uploaded with by-reference flags is rejected in this first version.
+- Fixed references and INOUT values use ordinary typed fields. `POINTER TO T` / `REFERENCE TO T` with `TcRpcLengthIs` use `[]T`; `PVOID` with a count uses `[]byte`. Counts are element counts, indexed one-based in the complete PLC parameter list. Input slices must match the explicit count exactly; output slices are allocated to that count. Calls do not mutate input slices.
+- Length links must point to input-only integer parameters. Output-only or mutable length parameters, unbounded pointers, nested pointers/references, RPC array-dimension flags, custom packing and unknown signatures return `UnsupportedRPCError`. Go memory addresses are never sent to the PLC.
 - Parameter values are concatenated in declaration order; the response begins with the return value, followed by outputs. Internal struct offsets come from PLC metadata, never Go memory alignment.
 - The connection owns and deduplicates method handles. Reconnects and symbol-version changes invalidate bindings; generated signatures include nested layouts and enum values. Incompatible changes return `ErrRPCSignatureChanged` before invocation. Comments and method-table placement do not affect signatures.
 - `Call` observes its context while waiting for a connection generation, handle acquisition and response. `RequestTimeout` also bounds the call. Cancellation cannot undo PLC execution; calls are never automatically retried and a failed decode returns no partial result.
@@ -206,6 +207,7 @@ go vet ./...
 go test -run='^$' -bench=BenchmarkReview -benchmem
 go test -run='^$' -fuzz=FuzzDatatypeUpload -fuzztime=10s
 go test -run='^$' -fuzz=FuzzRPCMetadata -fuzztime=10s
+go test -run='^$' -fuzz=FuzzRPCBufferCodec -fuzztime=10s
 ```
 
 Run these commands from the repository root. The root module does not include the nested CLI/example modules in its `./...` traversal. Root tests use local TCP/Unix sockets; they do not contact a PLC. See [PERFORMANCE.md](PERFORMANCE.md) for benchmark scope and recorded results.
@@ -234,7 +236,7 @@ Credentialed route-helper smoke test:
 - No automated live PLC CI in this repo; offline tests use a local fake AMS router.
 - Sum commands are capped at 500 subcommands and the configured frame size.
 - Notification overflow drops new samples and must be monitored by applications requiring loss detection.
-- RPC is currently validated offline with synthetic metadata. Live captured fixtures and real TwinCAT validation remain open; pointer/reference marshalling is deferred.
+- RPC, references and pointer buffers are validated offline with synthetic metadata. Live captured fixtures and real TwinCAT validation remain open. [RPC_CHECKPOINTS.md](RPC_CHECKPOINTS.md) records the two checkpoints and their hardware validation gates.
 
 ## License
 

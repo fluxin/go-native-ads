@@ -2,6 +2,7 @@
 package main
 
 //go:generate go run ../../cmd/codegen/main.go -rpc=MAIN.rpc=RPCClient -o=generated.go -pkg=main
+//go:generate go run ../../cmd/codegen/main.go -rpc=MAIN.rpcRefs=ReferenceClient -o=references_generated.go -pkg=main
 
 import (
 	"context"
@@ -18,6 +19,8 @@ func main() {
 	ip := flag.String("ip", "127.0.0.1", "AMS router IP")
 	netID := flag.String("netid", "localhost", "target AMS Net ID")
 	instance := flag.String("instance", "MAIN.rpc", "FB_RPC instance")
+	references := flag.Bool("references", false, "also run reference and pointer buffer checks")
+	referenceInstance := flag.String("reference-instance", "MAIN.rpcRefs", "FB_RPCReferences instance")
 	flag.Parse()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -32,6 +35,12 @@ func main() {
 	if err = runSmoke(ctx, conn, *instance); err != nil {
 		conn.Close()
 		log.Fatal(err)
+	}
+	if *references {
+		if err = runReferenceSmoke(ctx, conn, *referenceInstance); err != nil {
+			conn.Close()
+			log.Fatal(err)
+		}
 	}
 	conn.Close()
 }

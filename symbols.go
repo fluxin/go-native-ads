@@ -48,6 +48,7 @@ type EnumMember struct {
 }
 
 const (
+	datatypeFlagReferenceTo       uint32 = 0x00000004
 	datatypeFlagTypeGUID          uint32 = 0x00000080
 	datatypeFlagCopyMask          uint32 = 0x00000200
 	datatypeFlagMethodInfos       uint32 = 0x00000800
@@ -86,6 +87,7 @@ type SymbolUploadInfo struct {
 }
 
 type Symbol struct {
+	rpcLength         string // RPC slice element schema; count is an input parameter.
 	cache             *symbolCache
 	arrayContinuation bool
 	FullName          string

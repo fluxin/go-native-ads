@@ -164,7 +164,7 @@ func TestRPCWireLayout(t *testing.T) {
 }
 func TestRPCRejectsUnsupportedSignatures(t *testing.T) {
 	for _, change := range []func(*RPCMethod){
-		func(m *RPCMethod) { m.Parameters[0].Flags |= RPCByReference },
+		func(m *RPCMethod) { m.Parameters[0].Flags |= 0x8 },
 		func(m *RPCMethod) { m.Parameters[0].LengthIsParameterIndex = 1 },
 		func(m *RPCMethod) { m.Parameters[0].DataType = "POINTER TO BYTE" },
 		func(m *RPCMethod) { m.Parameters[0].AlignSize = 3 },
@@ -464,12 +464,19 @@ func rpcSmokeMethods() []RPCMethod {
 	}
 }
 func TestRPCExampleClientCurrent(t *testing.T) {
-	data, err := parseUploadSymbolInfoDataTypes(rpcDatatypeWire(rpcSmokeMethods()...))
+	checkRPCExampleClient(t, rpcSmokeMethods(), "RPCClient", "examples/rpc/generated.go")
+}
+func TestRPCReferenceExampleClientCurrent(t *testing.T) {
+	checkRPCExampleClient(t, rpcReferenceSmokeMethods(), "ReferenceClient", "examples/rpc/references_generated.go")
+}
+func checkRPCExampleClient(t *testing.T, methods []RPCMethod, client, path string) {
+	t.Helper()
+	data, err := parseUploadSymbolInfoDataTypes(rpcDatatypeWire(methods...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	conn := &Connection{datatypes: data, symbols: map[string]*Symbol{"MAIN.rpc": {DataType: "FB_RPC"}}}
-	code, err := conn.GenerateRPCClient("MAIN.rpc", "RPCClient")
+	code, err := conn.GenerateRPCClient("MAIN.rpc", client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +484,6 @@ func TestRPCExampleClientCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := "examples/rpc/generated.go"
 	if os.Getenv("UPDATE_RPC_GOLDEN") == "1" {
 		if err = os.WriteFile(path, []byte(source), 0644); err != nil {
 			t.Fatal(err)
@@ -488,7 +494,7 @@ func TestRPCExampleClientCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if source != string(expected) {
-		t.Fatal("RPC example is stale; run UPDATE_RPC_GOLDEN=1 go test -run TestRPCExampleClientCurrent")
+		t.Fatal("RPC example is stale; run UPDATE_RPC_GOLDEN=1 go test -run 'TestRPC.*ExampleClientCurrent'")
 	}
 }
 

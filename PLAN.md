@@ -6,7 +6,7 @@ Only open work items are listed here. The v0.1.0 GitHub migration, offline harde
 
 0. Live validation of hardening and RPC
    - Rerun all PLC smoke checks after transport/codec/codegen changes.
-   - Import `examples/rpc/plc` declarations, regenerate its client from a real target, and run the smoke harness.
+   - Test both named checkpoints using `RPC_CHECKPOINTS.md`. Import the baseline and reference PLC fixtures, regenerate each client from a real target, and run the smoke harness.
    - Capture actual RPC metadata/frames; verify mixed widths, fixed IN/OUT/INOUT representations, compound values, reconnect, signature changes, and handle cleanup.
    - Offline RPC fixtures are synthetic. Do not call the live ABI gate complete based on those tests.
    - Exercise reconnect, online layout changes, notification overflow/cancellation, and server-side cleanup on real TwinCAT.
@@ -21,7 +21,7 @@ Only open work items are listed here. The v0.1.0 GitHub migration, offline harde
 
 ## Deferred extras (feature parity; intentionally not short-term)
 
-1. Extended RPC signatures: pointer/reference marshalling, `TcRpcLengthIs`, direct RPC array-dimension flags and custom packing.
+1. Extended RPC signatures: mutable/output-only length links, unbounded/nested pointers, direct RPC array-dimension flags and custom packing. Fixed references and input-counted buffers are implemented offline; hardware validation remains open.
 2. Additional administrative/system commands.
    - Remote process helpers (`StartProcess`-style command wrappers where supported).
    - File service helpers (read/write/delete/find via ADS file services).

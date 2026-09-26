@@ -91,23 +91,9 @@ func compileCodec(t reflect.Type, s *Symbol, types map[string]SymbolUploadDataTy
 			if t.Kind() != reflect.Struct || isTimeType(t) {
 				return mismatch()
 			}
-			fields := make(map[string]int, t.NumField())
-			for i := 0; i < t.NumField(); i++ {
-				field := t.Field(i)
-				name := field.Tag.Get("ads")
-				if name == "-" {
-					continue
-				}
-				if name == "" {
-					name = field.Name
-				}
-				if field.PkgPath != "" {
-					return nil, fmt.Errorf("unexported field %s", field.Name)
-				}
-				if _, exists := fields[name]; exists {
-					return nil, fmt.Errorf("duplicate ADS field %s", name)
-				}
-				fields[name] = i
+			fields, err := codecStructFields(t)
+			if err != nil {
+				return nil, err
 			}
 			if len(fields) != len(s.Children) {
 				return mismatch()
@@ -230,4 +216,29 @@ func isTimeType(t reflect.Type) bool     { return t == reflect.TypeFor[time.Time
 func isDurationType(t reflect.Type) bool { return t == reflect.TypeFor[time.Duration]() }
 func isPrimitiveType(t reflect.Type) bool {
 	return t != nil && t.Kind() != reflect.Struct && t.Kind() != reflect.Array && t.Kind() != reflect.Slice
+}
+
+func codecStructFields(t reflect.Type) (map[string]int, error) {
+	if t.Kind() != reflect.Struct || isTimeType(t) {
+		return nil, fmt.Errorf("expected record struct, got %s", t)
+	}
+	fields := make(map[string]int, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name := field.Tag.Get("ads")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		if field.PkgPath != "" {
+			return nil, fmt.Errorf("unexported field %s", field.Name)
+		}
+		if _, exists := fields[name]; exists {
+			return nil, fmt.Errorf("duplicate ADS field %s", name)
+		}
+		fields[name] = i
+	}
+	return fields, nil
 }

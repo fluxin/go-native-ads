@@ -25,8 +25,10 @@ type RPCParameter struct {
 	Size, AlignSize, ADSDataType uint32
 	Flags                        RPCParameterFlags
 	TypeGUID                     [16]byte
-	LengthIsParameterIndex       uint16
-	Attributes                   []Attribute
+	// LengthIsParameterIndex is one-based in the complete parameter list;
+	// zero means no linked count. The count is in referenced elements.
+	LengthIsParameterIndex uint16
+	Attributes             []Attribute
 }
 
 // RPCMethod describes an uploaded PLC method. Parameter order is significant.

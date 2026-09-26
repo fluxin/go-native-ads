@@ -66,7 +66,7 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 - `binding.go` owns typed symbol/batch rebinding; `ads.go` owns deduplicated named handles for symbols and methods. Lifecycle reset invalidates that table; Close releases its handles.
 - `rpc.go`: `Connection.BindRPC[I,O]`, `RPC.Call(ctx,input)`, `RPCMethods`, `RPCOptions.Signature`, `ErrRPCSignatureChanged`, `UnsupportedRPCError`.
 - `codegen_rpc.go` emits named clients, records and shared type dependencies. File formatting/collision checks and enums live in the library, used by the CLI's `-rpc=instance=Client` option.
-- RPC records reuse the existing codec. Empty records are supported; unsupported reference/pointer/length-linked signatures fail explicitly. Calls are never retried.
+- RPC records reuse existing value codecs via `rpc_values.go`. Fixed references are values; length-linked buffers are slices. Counts must be input-only integers, indexed one-based in the complete method parameter list. Pointer widths never determine pointee widths. Calls are never retried.
 - Caller cancellation reaches generation admission, shared handle acquisition and requests. Do not add goroutines solely to wait on locks.
 - `examples/rpc` contains generated Go and PLC sources. The golden metadata is synthetic; it does not establish real PLC ABI validation.
 
@@ -96,7 +96,7 @@ ads.NewBatchWriter[S](conn, handles...) (*BatchWriter[S], error)
 ## Open work
 
 - Immediate focus: run the RPC fixture and rerun live PLC smoke and exercise reconnect/online schema changes on a real target; offline socket and race regression gates cover the hardened implementation.
-- Deferred extras: pointer/reference RPC marshalling, length-linked buffers, custom packing.
+- Deferred extras: mutable/output-only length links, unbounded/nested pointers, direct RPC array-dimension flags and custom packing. See `RPC_CHECKPOINTS.md` for the baseline and extended hardware gates.
 
 ## Core style and implementation patterns
 

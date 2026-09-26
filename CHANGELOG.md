@@ -1,8 +1,8 @@
 # Changelog
 
-## v0.2.0 — Unreleased
+## v0.2.0 — 2026-09-25
 
-- Raise the development minimum to Go 1.27 and add generic `Connection.GetHandle`, `NewBatchReader`, `NewBatchWriter`, and `BindRPC` methods. Existing symbol/batch package functions remain compatible.
+- Raise the minimum Go version to 1.27 and add generic `Connection.GetHandle`, `NewBatchReader`, `NewBatchWriter`, and `BindRPC` methods. Existing symbol/batch package functions remain compatible.
 - Add bounded RPC metadata parsing, typed fixed-layout calls with per-call context, shared named-handle ownership and reconnect/schema signature validation. Calls are never automatically retried.
 - Generate typed RPC clients, input/result records, dependent structs/enums, and void methods via `-rpc=instance=Client`. Share formatting, enum emission and collision checks between library and CLI.
 - Consolidate symbol/batch binding logic and batch layout state. Reuse the codec for RPC values and empty records.

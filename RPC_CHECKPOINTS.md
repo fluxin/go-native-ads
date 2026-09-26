@@ -1,6 +1,6 @@
 # RPC checkpoints and hardware validation
 
-Both checkpoints are local JJ bookmarks and committed revisions. They are development checkpoints, not published releases. Go 1.27 is required. Neither has been validated on a real TwinCAT target.
+Both checkpoints are committed revisions retained as JJ bookmarks and GitHub branches. The reference implementation is included in v0.2.0, whose release metadata commit follows both checkpoints. Go 1.27 is required. Neither checkpoint has been validated on a real TwinCAT target.
 
 | Checkpoint | Scope | Offline evidence | Live status |
 | --- | --- | --- | --- |

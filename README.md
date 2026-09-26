@@ -1,11 +1,11 @@
 # go-native-ads
 
-Pure-Go TwinCAT ADS client ([github.com/fluxin/go-native-ads](https://github.com/fluxin/go-native-ads)). The development branch requires Go 1.27 or newer.
+Pure-Go TwinCAT ADS client ([github.com/fluxin/go-native-ads](https://github.com/fluxin/go-native-ads)). Requires Go 1.27 or newer.
 based on my original implementation and cleaned up for modern golang. Generics and handle IO added by myself, codegen, docs, tests, and additional features thankfully supported by AI.
 
 ## Current status
 
-Current published release: **v0.1.0** (Go 1.26). The working tree targets **v0.2.0** (Go 1.27) with typed RPC and generated clients. See [CHANGELOG.md](CHANGELOG.md) for migration and compatibility notes, [PERFORMANCE.md](PERFORMANCE.md) for measured CPU improvements, and [PLAN.md](PLAN.md) for remaining work.
+Current release: **v0.2.0** (Go 1.27), with typed RPC, references, pointer buffers and generated clients. See [CHANGELOG.md](CHANGELOG.md) for migration and compatibility notes, [PERFORMANCE.md](PERFORMANCE.md) for measured CPU improvements, and [PLAN.md](PLAN.md) for remaining work.
 
 - Core behavior is implemented: connect, typed handle read/write, batch read/write (sum commands), notifications, symbol/type upload, typed RPC invocation, and code generation.
 - Recent protocol/correctness fixes are in place for notification timing, sum parsing, command response validation, and array metadata handling.
@@ -19,7 +19,7 @@ Current published release: **v0.1.0** (Go 1.26). The working tree targets **v0.2
 ## Install
 
 ```bash
-go get github.com/fluxin/go-native-ads@v0.1.0
+go get github.com/fluxin/go-native-ads@v0.2.0
 ```
 
 Import the package as `ads`:
@@ -34,7 +34,7 @@ Replace `codeberg.org/fluxin/go-native-ads` imports with `github.com/fluxin/go-n
 
 The GitHub history includes the original `v0.0.1`–`v0.0.6` tags unchanged; those versions still declare the Codeberg module path. **v0.1.0 is the first release using the GitHub module path.**
 
-The install command selects the published v0.1.0 release. RPC and the connection-level generic methods below are v0.2.0 development APIs; use this checkout and the examples' local replacements until that release is published.
+RPC and the connection-level generic methods below were added in v0.2.0. Projects staying on Go 1.26 can continue using v0.1.0 without these APIs.
 
 ## API snapshot
 

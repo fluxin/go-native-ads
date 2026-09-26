@@ -7,7 +7,7 @@
 ## Repository and release
 
 - Canonical repository/module: `github.com/fluxin/go-native-ads`.
-- Published release: `v0.1.0` (Go 1.26); development target: `v0.2.0` (Go 1.27). See `CHANGELOG.md` for compatibility changes.
+- Current release: `v0.2.0` (Go 1.27); `v0.1.0` remains available for Go 1.26. See `CHANGELOG.md` for compatibility changes.
 - Historical `v0.0.1`–`v0.0.6` tags retain the Codeberg module path; do not retag or rewrite them.
 - The CLI and examples are separate modules with local replacements. Test/vet each module as shown in `README.md`; root `./...` does not cover them.
 

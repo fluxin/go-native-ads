@@ -344,7 +344,7 @@ func compileRPCSource(t *testing.T, source string, tests ...string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module := fmt.Sprintf("module generated\n\ngo 1.27\nrequire github.com/fluxin/go-native-ads v0.1.0\nreplace github.com/fluxin/go-native-ads => %s\n", filepath.ToSlash(root))
+	module := fmt.Sprintf("module generated\n\ngo 1.27\nrequire github.com/fluxin/go-native-ads v0.2.0\nreplace github.com/fluxin/go-native-ads => %s\n", filepath.ToSlash(root))
 	if err = os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
 	}
